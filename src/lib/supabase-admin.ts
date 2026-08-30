@@ -44,3 +44,26 @@ export class HttpError extends Error {
     this.status = status;
   }
 }
+
+/**
+ * Filter sourceIds down to those belonging to notebooks owned by the user.
+ * Returns [] when none of the ids are theirs.
+ */
+export async function getOwnedSourceIds(
+  userId: string,
+  sourceIds: string[]
+): Promise<string[]> {
+  if (sourceIds.length === 0) return [];
+  const { data, error } = await supabaseAdmin
+    .from("sources")
+    .select("id, notebooks!inner(user_id)")
+    .in("id", sourceIds);
+  if (error) throw error;
+  return (data ?? [])
+    .filter((row) => {
+      const joined = row.notebooks as unknown as { user_id: string }[] | { user_id: string };
+      const ownerId = Array.isArray(joined) ? joined[0]?.user_id : joined.user_id;
+      return ownerId === userId;
+    })
+    .map((row) => row.id);
+}

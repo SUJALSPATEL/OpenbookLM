@@ -1,794 +1,55 @@
 "use client";
 
-import { useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useState } from "react";
 import Image from "next/image";
 import { useRouter } from "next/navigation";
 import { Group, Panel, Separator } from "react-resizable-panels";
-import {
-  Check,
-  FileText,
-  Link2,
-  ListTree,
-  Loader2,
-  Menu,
-  MessageSquare,
-  Network,
-  Plus,
-  SearchCheck,
-  Send,
-  ClipboardCheck,
-  ChevronDown,
-  Pencil,
-  Trash2,
-  X,
-  SquarePlay,
-  FileUp,
-} from "lucide-react";
+import { ChevronDown, X } from "lucide-react";
 import { supabase } from "@/lib/supabase";
 import ThemeToggle from "@/components/ThemeToggle";
+import SourcesPane from "@/components/dashboard/SourcesPane";
+import ChatPane from "@/components/dashboard/ChatPane";
+import StudioPane from "@/components/dashboard/StudioPane";
+import NotebookSidebar from "@/components/dashboard/NotebookSidebar";
+import AddSourceModal, { type NewSourceDraft } from "@/components/dashboard/AddSourceModal";
+import ArtifactModal from "@/components/dashboard/ArtifactModal";
+import CitationModal from "@/components/dashboard/CitationModal";
+import {
+  type Artifact,
+  type ArtifactType,
+  type ChatMsg,
+  type Notebook,
+  type Source,
+  type SourceKind,
+} from "@/lib/types";
 
-/* ---------------- types ---------------- */
-
-type SourceStatus = "ready" | "processing" | "failed";
-type SourceKind = "url" | "pdf" | "youtube" | "text";
-
-type Source = {
-  id: string;
-  title: string;
-  meta: string;
-  kind: SourceKind;
-  status: SourceStatus;
-  enabled: boolean;
-};
-
-type ChatMsg = {
-  role: "user" | "assistant";
-  text: string;
-  refusal?: boolean;
-  notice?: boolean;
-};
-
-type Notebook = {
-  id: string;
-  title: string;
-  createdAt: number;
-  sources: Source[];
-  chat: ChatMsg[];
+const TASK_LABELS: Record<ArtifactType, string> = {
+  mindmap: "Mindmap",
+  quiz: "Quiz",
+  summary: "Summary",
+  factcheck: "Fact-check",
+  deep: "Deep research",
 };
 
 function newNotebook(title = "Untitled notebook"): Notebook {
-  return { id: crypto.randomUUID(), title, createdAt: Date.now(), sources: [], chat: [] };
-}
-
-const KIND_ICON = { url: Link2, pdf: FileText, youtube: SquarePlay, text: FileText } as const;
-
-const STUDIO_TASKS = [
-  { id: "mindmap", label: "Mindmap", icon: Network, desc: "concept graph" },
-  { id: "quiz", label: "Quiz", icon: ListTree, desc: "cited questions" },
-  { id: "summary", label: "Summary", icon: FileText, desc: "key points" },
-  { id: "factcheck", label: "Fact-check", icon: SearchCheck, desc: "verdict table" },
-  { id: "deep", label: "Deep research", icon: ClipboardCheck, desc: "cited report" },
-] as const;
-
-const STARTERS = [
-  "Summarize my sources",
-  "What are the key claims?",
-  "What do these sources disagree on?",
-];
-
-/* ---------------- small pieces ---------------- */
-
-function StatusChip({ status }: { status: SourceStatus }) {
-  const map = {
-    ready: { cls: "border-emerald-600/50 bg-emerald-500/10 text-emerald-600", label: "ready" },
-    processing: { cls: "border-amber-600/50 bg-amber-500/10 text-amber-600", label: "processing" },
-    failed: { cls: "border-rose-600/50 bg-rose-500/10 text-rose-600", label: "failed" },
-  }[status];
-  return (
-    <span className={`inline-flex shrink-0 items-center rounded-sm border px-1.5 py-0.5 font-mono text-[9px] uppercase tracking-wide ${map.cls}`}>
-      {map.label}
-    </span>
-  );
-}
-
-function Toggle({ on, onClick }: { on: boolean; onClick: () => void }) {
-  return (
-    <button
-      type="button"
-      role="switch"
-      aria-checked={on}
-      aria-label={on ? "Disable source" : "Enable source"}
-      onClick={onClick}
-      className={`relative h-5 w-9 shrink-0 cursor-pointer rounded-full border-2 border-line transition-colors duration-150 ${
-        on ? "bg-ink" : "bg-surface"
-      }`}
-    >
-      <span
-        className={`absolute top-1/2 h-3 w-3 -translate-y-1/2 rounded-full border-2 border-line transition-all duration-150 ${
-          on ? "left-[calc(100%-14px)] bg-app" : "left-0.5 bg-muted-c"
-        }`}
-      />
-    </button>
-  );
-}
-
-/* ---------------- add-source modal ---------------- */
-
-const ADD_KINDS = [
-  { id: "url", label: "URL", icon: Link2, hint: "Paste a web link" },
-  { id: "pdf", label: "PDF / DOCX", icon: FileUp, hint: "Pick a file" },
-  { id: "youtube", label: "YouTube", icon: SquarePlay, hint: "Paste a video link" },
-  { id: "text", label: "Text", icon: FileText, hint: "Paste raw text" },
-] as const;
-
-function AddSourceModal({
-  kind,
-  onClose,
-  onAdd,
-}: {
-  kind: SourceKind;
-  onClose: () => void;
-  onAdd: (s: Omit<Source, "id" | "enabled">) => void;
-}) {
-  const [value, setValue] = useState("");
-  const [file, setFile] = useState<File | null>(null);
-  const fileRef = useRef<HTMLInputElement>(null);
-
-  const meta = ADD_KINDS.find((k) => k.id === kind)!;
-  const isFile = kind === "pdf";
-  const isText = kind === "text";
-
-  const valid = isFile ? !!file : isText ? value.trim().length > 0 : value.trim().length > 3;
-
-  const submit = () => {
-    if (!valid) return;
-    if (isFile && file) {
-      onAdd({
-        title: file.name,
-        meta: `local · ${Math.max(1, Math.ceil(file.size / 1024))} KB`,
-        kind,
-        status: "processing",
-      });
-    } else if (isText) {
-      const t = value.trim();
-      onAdd({
-        title: t.length > 48 ? `${t.slice(0, 48)}…` : t,
-        meta: `pasted · ${t.length.toLocaleString()} chars`,
-        kind,
-        status: "processing",
-      });
-    } else {
-      let host = "link";
-      try {
-        host = new URL(value.startsWith("http") ? value : `https://${value}`).hostname.replace(/^www\./, "");
-      } catch {
-        /* keep fallback */
-      }
-      onAdd({
-        title: kind === "youtube" ? `YouTube — ${host}` : host,
-        meta: `${host} · ${kind === "youtube" ? "video" : "link"}`,
-        kind,
-        status: "processing",
-      });
-    }
-    onClose();
+  return {
+    id: crypto.randomUUID(),
+    title,
+    createdAt: Date.now(),
+    sources: [],
+    chat: [],
+    artifacts: [],
   };
-
-  return (
-    <div className="fixed inset-0 z-[70] flex items-center justify-center bg-app/60 p-5 backdrop-blur-[2px]">
-      <div className="anim-rise w-full max-w-md rounded-lg border-2 border-line bg-surface-2 p-6 shadow-hard-lg">
-        <div className="flex items-center justify-between">
-          <span className="inline-flex items-center gap-2 font-mono text-[12px] font-bold uppercase tracking-widest text-app">
-            <meta.icon className="h-4 w-4 text-chip" />
-            add {meta.label.toLowerCase()}
-          </span>
-          <button
-            type="button"
-            onClick={onClose}
-            aria-label="Close"
-            className="cursor-pointer rounded-sm border-2 border-line bg-surface p-1 text-muted-c transition-colors hover:text-app"
-          >
-            <X className="h-3.5 w-3.5" />
-          </button>
-        </div>
-
-        <div className="mt-5">
-          {isFile ? (
-            <>
-              <input
-                ref={fileRef}
-                type="file"
-                accept=".pdf,.docx,.txt,.md"
-                className="hidden"
-                onChange={(e) => setFile(e.target.files?.[0] ?? null)}
-              />
-              <button
-                type="button"
-                onClick={() => fileRef.current?.click()}
-                className="flex w-full cursor-pointer flex-col items-center justify-center gap-2 rounded-md border-2 border-dashed border-line bg-surface px-4 py-8 text-center transition-all duration-150 hover:-translate-y-0.5 hover:shadow-hard-sm"
-              >
-                <FileUp className="h-6 w-6 text-muted-c" />
-                <span className="font-mono text-[12px] text-app">
-                  {file ? file.name : "click to choose a file"}
-                </span>
-                <span className="font-mono text-[10px] text-muted-c">
-                  {file ? `${Math.max(1, Math.ceil(file.size / 1024))} KB selected` : "PDF · DOCX · TXT · MD"}
-                </span>
-              </button>
-            </>
-          ) : isText ? (
-            <textarea
-              autoFocus
-              value={value}
-              onChange={(e) => setValue(e.target.value)}
-              rows={6}
-              placeholder="Paste any text — notes, an article, a transcript…"
-              className="w-full resize-none rounded-md border-2 border-line bg-surface px-3.5 py-3 text-[13px] text-app outline-none transition-all duration-150 placeholder:text-muted-c/70 focus:-translate-y-0.5 focus:shadow-hard-sm"
-            />
-          ) : (
-            <input
-              autoFocus
-              value={value}
-              onChange={(e) => setValue(e.target.value)}
-              onKeyDown={(e) => e.key === "Enter" && submit()}
-              placeholder={kind === "youtube" ? "https://youtube.com/watch?v=…" : "https://example.com/article"}
-              className="w-full rounded-md border-2 border-line bg-surface px-3.5 py-3 font-mono text-[13px] text-app outline-none transition-all duration-150 placeholder:text-muted-c/70 focus:-translate-y-0.5 focus:shadow-hard-sm"
-            />
-          )}
-        </div>
-
-        <button
-          type="button"
-          onClick={submit}
-          disabled={!valid}
-          className="mt-5 inline-flex w-full cursor-pointer items-center justify-center gap-2 rounded-md border-2 border-line bg-ink px-6 py-3 text-sm font-semibold text-on-ink shadow-hard-accent transition-all duration-150 hover:-translate-x-0.5 hover:-translate-y-0.5 hover:shadow-[7px_7px_0_0_var(--accent)] active:translate-x-0.5 active:translate-y-0.5 active:shadow-[2px_2px_0_0_var(--accent)] disabled:cursor-not-allowed disabled:opacity-40"
-        >
-          <Plus className="h-4 w-4" />
-          Add source
-        </button>
-        <p className="mt-3 text-center font-mono text-[10px] text-muted-c">
-          it will index in the background · you can keep working
-        </p>
-      </div>
-    </div>
-  );
 }
 
-/* ---------------- sources pane ---------------- */
+type CitationState = {
+  n: number;
+  sourceTitle: string;
+  content: string;
+  loading: boolean;
+} | null;
 
-function SourcesPane({
-  sources,
-  onAdd,
-  onToggle,
-  onDelete,
-}: {
-  sources: Source[];
-  onAdd: (kind: SourceKind) => void;
-  onToggle: (id: string) => void;
-  onDelete: (id: string) => void;
-}) {
-  const [addOpen, setAddOpen] = useState(false);
-  const answering = sources.filter((s) => s.enabled && s.status === "ready").length;
-
-  return (
-    <div className="flex h-full flex-col">
-      <div className="flex h-11 items-center justify-between border-b-2 border-line px-3.5">
-        <span className="font-mono text-[11px] font-bold uppercase tracking-widest text-app">
-          sources
-        </span>
-        <div className="relative">
-          <button
-            type="button"
-            onClick={() => setAddOpen((o) => !o)}
-            className="inline-flex cursor-pointer items-center gap-1 rounded-sm border-2 border-line bg-surface px-2 py-1 font-mono text-[11px] font-bold text-app transition-all duration-150 hover:bg-ink hover:text-on-ink active:translate-y-0.5"
-          >
-            <Plus className="h-3 w-3" /> Add
-          </button>
-          {addOpen && (
-            <div className="anim-rise absolute right-0 top-full z-30 mt-1.5 w-40 overflow-hidden rounded-md border-2 border-line bg-surface shadow-hard-lg">
-              {ADD_KINDS.map((k) => (
-                <button
-                  key={k.id}
-                  type="button"
-                  onClick={() => {
-                    setAddOpen(false);
-                    onAdd(k.id);
-                  }}
-                  className="flex w-full cursor-pointer items-center gap-2 border-b border-line px-3 py-2 text-left font-mono text-[12px] text-app transition-colors last:border-b-0 hover:bg-chip"
-                >
-                  <k.icon className="h-3.5 w-3.5 text-muted-c" />
-                  {k.label}
-                </button>
-              ))}
-            </div>
-          )}
-        </div>
-      </div>
-
-      <div className="flex-1 overflow-y-auto p-3">
-        {sources.length === 0 ? (
-          <div className="flex h-full flex-col items-center justify-center px-4 text-center">
-            <span className="flex h-10 w-10 items-center justify-center rounded-sm border-2 border-line bg-surface-2 text-muted-c">
-              <Link2 className="h-5 w-5" />
-            </span>
-            <p className="mt-4 font-mono text-[12px] leading-relaxed text-muted-c">
-              no sources yet
-              <br />
-              add a link, a file, a video, or text
-            </p>
-            <button
-              type="button"
-              onClick={() => onAdd("url")}
-              className="mt-4 inline-flex cursor-pointer items-center gap-1.5 rounded-sm border-2 border-line bg-surface px-3 py-1.5 font-mono text-[11px] font-bold text-app transition-all duration-150 hover:-translate-y-0.5 hover:shadow-hard-sm"
-            >
-              <Plus className="h-3 w-3" /> Add your first
-            </button>
-          </div>
-        ) : (
-          <div className="flex flex-col gap-2">
-            {sources.map((s) => {
-              const Icon = KIND_ICON[s.kind];
-              return (
-                <div
-                  key={s.id}
-                  className={`group rounded-md border-2 border-line bg-surface p-2.5 transition-all duration-150 hover:-translate-y-0.5 hover:shadow-hard-sm ${
-                    !s.enabled ? "opacity-50" : ""
-                  }`}
-                >
-                  <div className="flex items-start gap-2">
-                    <span className="mt-0.5 flex h-6 w-6 shrink-0 items-center justify-center rounded-sm border-2 border-line bg-surface-2 text-app">
-                      <Icon className="h-3.5 w-3.5" />
-                    </span>
-                    <div className="min-w-0 flex-1">
-                      <p className="truncate text-[12px] font-semibold text-app">{s.title}</p>
-                      <p className="truncate font-mono text-[10px] text-muted-c">{s.meta}</p>
-                    </div>
-                    <div className="flex shrink-0 items-center gap-1">
-                      <StatusChip status={s.status} />
-                      <button
-                        type="button"
-                        onClick={() => onDelete(s.id)}
-                        aria-label={`Remove ${s.title}`}
-                        title="Remove source"
-                        className="cursor-pointer rounded-sm p-0.5 text-muted-c opacity-0 transition-all hover:text-rose-600 focus-visible:opacity-100 group-hover:opacity-100"
-                      >
-                        <Trash2 className="h-3.5 w-3.5" />
-                      </button>
-                    </div>
-                  </div>
-                  <div className="mt-2 flex items-center justify-between border-t border-line pt-2">
-                    <span className="font-mono text-[9.5px] uppercase tracking-wide text-muted-c">
-                      {s.enabled ? "in this chat" : "disabled"}
-                    </span>
-                    <Toggle on={s.enabled} onClick={() => onToggle(s.id)} />
-                  </div>
-                </div>
-              );
-            })}
-          </div>
-        )}
-      </div>
-
-      <div className="border-t-2 border-line px-3.5 py-2 font-mono text-[10px] text-muted-c">
-        {answering} of {sources.length} answering
-      </div>
-    </div>
-  );
-}
-
-/* ---------------- chat pane ---------------- */
-
-function ChatPane({
-  notebook,
-  onRename,
-  onSend,
-  thinking,
-  onOpenSidebar,
-}: {
-  notebook: Notebook;
-  onRename: (title: string) => void;
-  onSend: (text: string) => void;
-  thinking: boolean;
-  onOpenSidebar: () => void;
-}) {
-  const [input, setInput] = useState("");
-  const [editing, setEditing] = useState(false);
-  const [draftTitle, setDraftTitle] = useState(notebook.title);
-  const scrollRef = useRef<HTMLDivElement>(null);
-
-  const activeCount = notebook.sources.filter((s) => s.enabled && s.status === "ready").length;
-
-  useEffect(() => {
-    scrollRef.current?.scrollTo({ top: scrollRef.current.scrollHeight });
-  }, [notebook.chat, thinking]);
-
-  useEffect(() => {
-    setDraftTitle(notebook.title);
-  }, [notebook.id, notebook.title]);
-
-  const send = (text?: string) => {
-    const q = (text ?? input).trim();
-    if (!q || thinking) return;
-    setInput("");
-    onSend(q);
-  };
-
-  return (
-    <div className="flex h-full flex-col">
-      {/* header: hamburger + notebook title + rename */}
-      <div className="flex h-11 items-center gap-2 border-b-2 border-line px-3">
-        <button
-          type="button"
-          onClick={onOpenSidebar}
-          aria-label="Notebook history"
-          title="Notebook history"
-          className="inline-flex h-7 w-7 shrink-0 cursor-pointer items-center justify-center rounded-sm border-2 border-line bg-surface text-app transition-all duration-150 hover:-translate-y-0.5 hover:shadow-hard-sm"
-        >
-          <Menu className="h-4 w-4" />
-        </button>
-
-        {editing ? (
-          <>
-            <input
-              autoFocus
-              value={draftTitle}
-              onChange={(e) => setDraftTitle(e.target.value)}
-              onKeyDown={(e) => {
-                if (e.key === "Enter") {
-                  onRename(draftTitle.trim() || "Untitled notebook");
-                  setEditing(false);
-                }
-              }}
-              className="flex-1 rounded-sm border-2 border-line bg-surface px-2 py-1 font-mono text-[12px] font-bold text-app outline-none"
-            />
-            <button
-              type="button"
-              onClick={() => {
-                onRename(draftTitle.trim() || "Untitled notebook");
-                setEditing(false);
-              }}
-              className="cursor-pointer text-emerald-600 transition-transform hover:scale-110"
-              aria-label="Save notebook title"
-            >
-              <Check className="h-4 w-4" />
-            </button>
-          </>
-        ) : (
-          <>
-            <MessageSquare className="h-3.5 w-3.5 shrink-0 text-muted-c" />
-            <span className="flex-1 truncate font-mono text-[12px] font-bold text-app">
-              {notebook.title}
-            </span>
-            <button
-              type="button"
-              onClick={() => setEditing(true)}
-              aria-label="Rename notebook"
-              className="shrink-0 cursor-pointer text-muted-c transition-colors hover:text-app"
-            >
-              <Pencil className="h-3.5 w-3.5" />
-            </button>
-          </>
-        )}
-        <span className="ml-1 hidden shrink-0 items-center gap-1.5 rounded-sm border-2 border-line bg-surface-2 px-2 py-0.5 font-mono text-[10px] text-muted-c sm:inline-flex">
-          <span className="h-1.5 w-1.5 rounded-full bg-emerald-500" /> grounded
-        </span>
-      </div>
-
-      {/* messages */}
-      <div ref={scrollRef} className="flex-1 overflow-y-auto p-4">
-        <div className="mx-auto flex max-w-2xl flex-col gap-4">
-          {notebook.chat.length === 0 && !thinking ? (
-            <div className="flex h-full min-h-[240px] flex-col items-center justify-center text-center">
-              <span className="flex h-10 w-10 items-center justify-center rounded-sm border-2 border-line bg-surface font-mono text-sm font-bold text-app shadow-hard-sm">
-                ~
-              </span>
-              <p className="mt-4 max-w-sm text-[13px] leading-relaxed text-muted-c">
-                Attach sources on the left, then ask anything. Every answer
-                comes only from what you attached — with citations you can open.
-              </p>
-              <div className="mt-5 flex flex-wrap justify-center gap-2">
-                {STARTERS.map((s) => (
-                  <button
-                    key={s}
-                    type="button"
-                    onClick={() => send(s)}
-                    className="cursor-pointer rounded-sm border-2 border-line bg-surface px-3 py-1.5 font-mono text-[11px] text-app transition-all duration-150 hover:-translate-y-0.5 hover:shadow-hard-sm"
-                  >
-                    {s}
-                  </button>
-                ))}
-              </div>
-            </div>
-          ) : (
-            notebook.chat.map((m, i) =>
-              m.role === "user" ? (
-                <div key={i} className="self-end">
-                  <div className="ml-auto max-w-[85%] rounded-md border-2 border-line bg-ink px-3.5 py-2.5 text-[13px] font-medium text-on-ink">
-                    {m.text}
-                  </div>
-                </div>
-              ) : (
-                <div key={i} className="flex items-start gap-2">
-                  <span className="mt-0.5 flex h-5 w-5 shrink-0 items-center justify-center rounded-sm border-2 border-line bg-surface font-mono text-[10px] font-bold text-app">
-                    ~
-                  </span>
-                  <div
-                    className={`max-w-[90%] rounded-md border-2 px-3.5 py-2.5 ${
-                      m.refusal || m.notice
-                        ? "border-[var(--accent)] bg-chip text-app"
-                        : "border-line bg-surface text-app shadow-hard-sm"
-                    }`}
-                  >
-                    <p className="text-[13px] leading-relaxed">{m.text}</p>
-                    {m.refusal && (
-                      <p className="mt-1.5 font-mono text-[10px] text-chip">
-                        {activeCount === 0
-                          ? "0 sources attached → the gate refuses"
-                          : "no passage matched → no answer made up"}
-                      </p>
-                    )}
-                    {m.notice && (
-                      <p className="mt-1.5 font-mono text-[10px] text-chip">
-                        retrieval pipeline not connected in this build yet
-                      </p>
-                    )}
-                  </div>
-                </div>
-              )
-            )
-          )}
-          {thinking && (
-            <div className="flex items-start gap-2">
-              <span className="mt-0.5 flex h-5 w-5 shrink-0 items-center justify-center rounded-sm border-2 border-line bg-surface font-mono text-[10px] font-bold text-app">
-                ~
-              </span>
-              <div className="flex items-center gap-2 rounded-md border-2 border-line bg-surface px-3.5 py-2.5">
-                <Loader2 className="h-3.5 w-3.5 animate-spin text-chip" />
-                <span className="font-mono text-[11px] text-muted-c">
-                  retrieving · reranking · streaming
-                </span>
-              </div>
-            </div>
-          )}
-        </div>
-      </div>
-
-      {/* footer input */}
-      <div className="border-t-2 border-line p-3">
-        <div className="mx-auto max-w-2xl">
-          <div className="mb-2 flex items-center gap-1.5 font-mono text-[10px] uppercase tracking-wide text-muted-c">
-            <span className="h-1.5 w-1.5 rounded-full bg-emerald-500" />
-            answering from {activeCount} source{activeCount === 1 ? "" : "s"}
-          </div>
-          <div className="flex items-end gap-2 rounded-md border-2 border-line bg-surface-2 p-2 transition-shadow focus-within:shadow-hard-sm">
-            <textarea
-              value={input}
-              onChange={(e) => setInput(e.target.value)}
-              onKeyDown={(e) => {
-                if (e.key === "Enter" && !e.shiftKey) {
-                  e.preventDefault();
-                  send();
-                }
-              }}
-              rows={1}
-              placeholder="Ask your sources…"
-              className="max-h-32 flex-1 resize-none bg-transparent px-2 py-1.5 text-[13px] text-app outline-none placeholder:text-muted-c/70"
-            />
-            <button
-              type="button"
-              onClick={() => send()}
-              disabled={!input.trim() || thinking}
-              aria-label="Send"
-              className="inline-flex h-8 w-8 shrink-0 cursor-pointer items-center justify-center rounded-sm border-2 border-line bg-ink text-on-ink transition-all duration-150 hover:-translate-y-0.5 hover:shadow-hard-sm active:translate-y-0.5 active:shadow-none disabled:cursor-not-allowed disabled:opacity-40"
-            >
-              <Send className="h-3.5 w-3.5" />
-            </button>
-          </div>
-          <p className="mt-2 font-mono text-[9.5px] text-muted-c">
-            answers only from your sources — never a guess
-          </p>
-        </div>
-      </div>
-    </div>
-  );
-}
-
-/* ---------------- studio pane ---------------- */
-
-function StudioPane({ sourceCount }: { sourceCount: number }) {
-  const [running, setRunning] = useState<string | null>(null);
-  const [done, setDone] = useState<Set<string>>(new Set());
-
-  const run = (id: string) => {
-    if (running || sourceCount === 0) return;
-    setRunning(id);
-    setTimeout(() => {
-      setRunning(null);
-      setDone((d) => new Set(d).add(id));
-    }, 2200);
-  };
-
-  return (
-    <div className="flex h-full flex-col">
-      <div className="flex h-11 items-center justify-between border-b-2 border-line px-3.5">
-        <span className="font-mono text-[11px] font-bold uppercase tracking-widest text-app">
-          studio
-        </span>
-        <span className="font-mono text-[10px] text-muted-c">1-click</span>
-      </div>
-
-      <div className="flex-1 overflow-y-auto p-3">
-        {sourceCount === 0 ? (
-          <div className="flex h-full flex-col items-center justify-center px-4 text-center">
-            <Network className="h-6 w-6 text-muted-c" />
-            <p className="mt-3 font-mono text-[11px] leading-relaxed text-muted-c">
-              add sources first —
-              <br />
-              studio runs on what you attach
-            </p>
-          </div>
-        ) : (
-          <div className="grid gap-2.5">
-            {STUDIO_TASKS.map((t) => {
-              const isRunning = running === t.id;
-              const isDone = done.has(t.id);
-              return (
-                <button
-                  key={t.id}
-                  type="button"
-                  onClick={() => run(t.id)}
-                  disabled={!!running}
-                  className="group cursor-pointer rounded-md border-2 border-line bg-surface p-3 text-left transition-all duration-150 hover:-translate-y-0.5 hover:shadow-hard-sm active:translate-y-0 active:shadow-none disabled:cursor-wait"
-                >
-                  <div className="flex items-center gap-2.5">
-                    <span
-                      className={`flex h-8 w-8 shrink-0 items-center justify-center rounded-sm border-2 border-line transition-colors ${
-                        isDone
-                          ? "bg-emerald-500/15 text-emerald-600"
-                          : "bg-surface-2 text-app group-hover:bg-ink group-hover:text-on-ink"
-                      }`}
-                    >
-                      {isRunning ? (
-                        <Loader2 className="h-4 w-4 animate-spin" />
-                      ) : isDone ? (
-                        <Check className="h-4 w-4" />
-                      ) : (
-                        <t.icon className="h-4 w-4" />
-                      )}
-                    </span>
-                    <div className="min-w-0 flex-1">
-                      <p className="text-[12px] font-bold text-app">{t.label}</p>
-                      <p className="font-mono text-[9.5px] text-muted-c">{t.desc}</p>
-                    </div>
-                  </div>
-                  {isRunning && (
-                    <div className="mt-2.5 h-1.5 overflow-hidden rounded-full border border-line bg-surface-2">
-                      <div className="progress-shimmer h-full w-full" />
-                    </div>
-                  )}
-                  {isDone && (
-                    <p className="mt-2 font-mono text-[9.5px] text-emerald-600">
-                      artifact saved to your account
-                    </p>
-                  )}
-                </button>
-              );
-            })}
-          </div>
-        )}
-      </div>
-
-      <div className="border-t-2 border-line px-3.5 py-2 font-mono text-[10px] text-muted-c">
-        artifacts carry citations · same no-bluff rule
-      </div>
-    </div>
-  );
-}
-
-/* ---------------- notebook history sidebar ---------------- */
-
-function NotebookSidebar({
-  notebooks,
-  activeId,
-  onSwitch,
-  onNew,
-  onDelete,
-  onClose,
-}: {
-  notebooks: Notebook[];
-  activeId: string;
-  onSwitch: (id: string) => void;
-  onNew: () => void;
-  onDelete: (id: string) => void;
-  onClose: () => void;
-}) {
-  const sorted = [...notebooks].sort((a, b) => b.createdAt - a.createdAt);
-
-  return (
-    <>
-      <div
-        className="absolute inset-0 z-40 bg-app/40"
-        onClick={onClose}
-        aria-hidden
-      />
-      <aside className="anim-rise absolute inset-y-0 left-0 z-50 flex w-72 flex-col border-r-2 border-line bg-surface shadow-hard-xl">
-        <div className="flex h-11 items-center justify-between border-b-2 border-line px-3.5">
-          <span className="font-mono text-[11px] font-bold uppercase tracking-widest text-app">
-            notebooks
-          </span>
-          <button
-            type="button"
-            onClick={onClose}
-            aria-label="Close history"
-            className="cursor-pointer rounded-sm p-1 text-muted-c transition-colors hover:text-app"
-          >
-            <X className="h-4 w-4" />
-          </button>
-        </div>
-
-        <button
-          type="button"
-          onClick={onNew}
-          className="mx-3 mt-3 inline-flex cursor-pointer items-center justify-center gap-1.5 rounded-md border-2 border-line bg-ink px-3 py-2 font-mono text-[12px] font-bold text-on-ink transition-all duration-150 hover:-translate-y-0.5 hover:shadow-hard-sm active:translate-y-0.5 active:shadow-none"
-        >
-          <Plus className="h-3.5 w-3.5" /> New notebook
-        </button>
-
-        <div className="mt-3 flex-1 overflow-y-auto px-3 pb-3">
-          <div className="flex flex-col gap-1.5">
-            {sorted.map((nb) => {
-              const active = nb.id === activeId;
-              const count = nb.sources.length;
-              return (
-                <div
-                  key={nb.id}
-                  className={`group flex items-center gap-2 rounded-md border-2 px-2.5 py-2 transition-all duration-150 ${
-                    active
-                      ? "border-line bg-ink text-on-ink shadow-hard-sm"
-                      : "border-line bg-surface-2 text-app hover:-translate-y-0.5 hover:shadow-hard-sm"
-                  }`}
-                >
-                  <button
-                    type="button"
-                    onClick={() => onSwitch(nb.id)}
-                    className="min-w-0 flex-1 cursor-pointer text-left"
-                  >
-                    <p className={`truncate text-[12px] font-bold ${active ? "text-on-ink" : "text-app"}`}>
-                      {nb.title}
-                    </p>
-                    <p className={`font-mono text-[9.5px] ${active ? "text-on-ink/70" : "text-muted-c"}`}>
-                      {new Date(nb.createdAt).toLocaleDateString(undefined, { month: "short", day: "numeric" })} ·{" "}
-                      {count} source{count === 1 ? "" : "s"}
-                    </p>
-                  </button>
-                  {notebooks.length > 1 && (
-                    <button
-                      type="button"
-                      onClick={() => onDelete(nb.id)}
-                      aria-label={`Delete ${nb.title}`}
-                      title="Delete notebook"
-                      className={`shrink-0 cursor-pointer rounded-sm p-1 opacity-0 transition-all hover:text-rose-500 group-hover:opacity-100 ${
-                        active ? "text-on-ink/70" : "text-muted-c"
-                      }`}
-                    >
-                      <Trash2 className="h-3.5 w-3.5" />
-                    </button>
-                  )}
-                </div>
-              );
-            })}
-          </div>
-        </div>
-
-        <div className="border-t-2 border-line px-3.5 py-2 font-mono text-[9.5px] text-muted-c">
-          saved to your account · private to you
-        </div>
-      </aside>
-    </>
-  );
-}
-
-/* ---------------- page ---------------- */
+type Toast = { message: string; kind: "info" | "error" } | null;
 
 export default function DashboardPage() {
   const router = useRouter();
@@ -803,9 +64,16 @@ export default function DashboardPage() {
   const [mobileTab, setMobileTab] = useState<"sources" | "chat" | "studio">("chat");
   const [menuOpen, setMenuOpen] = useState(false);
   const [thinking, setThinking] = useState(false);
+  const [streamingText, setStreamingText] = useState<string | null>(null);
   const [addKind, setAddKind] = useState<SourceKind | null>(null);
+  const [runningTask, setRunningTask] = useState<ArtifactType | null>(null);
+  const [studioError, setStudioError] = useState<string | null>(null);
+  const [openArtifact, setOpenArtifact] = useState<Artifact | null>(null);
+  const [citation, setCitation] = useState<CitationState>(null);
+  const [toast, setToast] = useState<Toast>(null);
 
-  // auth guard + load this user's own notebooks from Supabase
+  /* ---------------- auth + load this user's workspace ---------------- */
+
   useEffect(() => {
     supabase.auth.getSession().then(async ({ data }) => {
       if (!data.session) {
@@ -824,13 +92,16 @@ export default function DashboardPage() {
         .eq("user_id", u.id)
         .order("created_at", { ascending: true });
 
-      let nbs: Notebook[] = (rows ?? []).map((r: { id: string; title: string; created_at: string }) => ({
-        id: r.id,
-        title: r.title,
-        createdAt: new Date(r.created_at).getTime(),
-        sources: [],
-        chat: [],
-      }));
+      let nbs: Notebook[] = (rows ?? []).map(
+        (r: { id: string; title: string; created_at: string }) => ({
+          id: r.id,
+          title: r.title,
+          createdAt: new Date(r.created_at).getTime(),
+          sources: [],
+          chat: [],
+          artifacts: [],
+        })
+      );
 
       // first visit -> seed one empty notebook for this account
       if (nbs.length === 0) {
@@ -845,17 +116,26 @@ export default function DashboardPage() {
       }
 
       const ids = nbs.map((n) => n.id);
-      const [{ data: srcRows }, { data: msgRows }] = await Promise.all([
+      const [{ data: srcRows }, { data: msgRows }, { data: artRows }] = await Promise.all([
         supabase.from("sources").select("*").in("notebook_id", ids),
         supabase
           .from("chat_messages")
           .select("*")
           .in("notebook_id", ids)
           .order("created_at", { ascending: true }),
+        supabase.from("artifacts").select("*").in("notebook_id", ids),
       ]);
 
       const byId = new Map(nbs.map((n) => [n.id, n]));
-      for (const r of (srcRows ?? []) as { notebook_id: string; id: string; title: string; meta: string; kind: SourceKind; status: SourceStatus; enabled: boolean }[]) {
+      for (const r of (srcRows ?? []) as {
+        notebook_id: string;
+        id: string;
+        title: string;
+        meta: string;
+        kind: SourceKind;
+        status: Source["status"];
+        enabled: boolean;
+      }[]) {
         byId.get(r.notebook_id)?.sources.push({
           id: r.id,
           title: r.title,
@@ -865,12 +145,36 @@ export default function DashboardPage() {
           enabled: r.enabled,
         });
       }
-      for (const r of (msgRows ?? []) as { notebook_id: string; role: "user" | "assistant"; text: string; flag: string | null }[]) {
+      for (const r of (msgRows ?? []) as {
+        notebook_id: string;
+        role: "user" | "assistant";
+        text: string;
+        flag: string | null;
+        citations: string[] | null;
+      }[]) {
         byId.get(r.notebook_id)?.chat.push({
           role: r.role,
           text: r.text,
           refusal: r.flag === "refusal",
           notice: r.flag === "notice",
+          error: r.flag === "error",
+          citations: Array.isArray(r.citations) ? r.citations : undefined,
+        });
+      }
+      for (const r of (artRows ?? []) as {
+        notebook_id: string;
+        id: string;
+        type: ArtifactType;
+        title: string;
+        content: string;
+        created_at: string;
+      }[]) {
+        byId.get(r.notebook_id)?.artifacts.push({
+          id: r.id,
+          type: r.type,
+          title: r.title,
+          content: r.content,
+          createdAt: new Date(r.created_at).getTime(),
         });
       }
 
@@ -879,17 +183,32 @@ export default function DashboardPage() {
     });
   }, [router]);
 
-  // ensure activeId points at something
+  // keep activeId pointing at something
   useEffect(() => {
     if (!notebooks.some((n) => n.id === activeId)) {
       setActiveId(notebooks[0]?.id ?? "");
     }
   }, [notebooks, activeId]);
 
+  // auto-hide toasts
+  useEffect(() => {
+    if (!toast) return;
+    const t = setTimeout(() => setToast(null), 4000);
+    return () => clearTimeout(t);
+  }, [toast]);
+
   const active = notebooks.find((n) => n.id === activeId) ?? notebooks[0];
 
-  const patchActive = (patch: Partial<Notebook>) =>
-    setNotebooks((ns) => ns.map((n) => (n.id === active.id ? { ...n, ...patch } : n)));
+  const patchActive = useCallback(
+    (patch: Partial<Notebook>) =>
+      setNotebooks((ns) => ns.map((n) => (n.id === active.id ? { ...n, ...patch } : n))),
+    [active.id]
+  );
+
+  const accessToken = async (): Promise<string | null> => {
+    const { data } = await supabase.auth.getSession();
+    return data.session?.access_token ?? null;
+  };
 
   const signOut = async () => {
     await supabase.auth.signOut();
@@ -897,80 +216,314 @@ export default function DashboardPage() {
     router.refresh();
   };
 
-  /* ---- sources actions ---- */
+  /* ---------------- ingestion (extract -> chunk -> embed -> index) ------- */
 
-  const addSource = (s: Omit<Source, "id" | "enabled">) => {
-    const src: Source = { ...s, id: crypto.randomUUID(), enabled: true };
+  const ingestDraft = async (draft: NewSourceDraft) => {
+    const id = crypto.randomUUID();
+    const src: Source = {
+      id,
+      title: draft.title,
+      meta: draft.meta,
+      kind: draft.kind,
+      status: "processing",
+      enabled: true,
+    };
     patchActive({ sources: [...active.sources, src] });
-    void supabase.from("sources").insert({
-      id: src.id,
+
+    const { error: insertError } = await supabase.from("sources").insert({
+      id,
       notebook_id: active.id,
-      title: src.title,
-      meta: src.meta,
-      kind: src.kind,
-      status: src.status,
+      title: draft.title,
+      meta: draft.meta,
+      kind: draft.kind,
+      status: "processing",
       enabled: true,
     });
-    // background indexing, then ready
-    setTimeout(() => {
+    if (insertError) {
+      patchActive({ sources: active.sources }); // roll back the optimistic row
+      setToast({ message: `Could not save the source: ${insertError.message}`, kind: "error" });
+      return;
+    }
+
+    const token = await accessToken();
+    try {
+      let res: Response;
+      if (draft.file) {
+        const fd = new FormData();
+        fd.append("sourceType", "pdf");
+        fd.append("sourceId", id);
+        fd.append("file", draft.file);
+        res = await fetch("/api/ingest", {
+          method: "POST",
+          headers: { Authorization: `Bearer ${token}` },
+          body: fd,
+        });
+      } else {
+        res = await fetch("/api/ingest", {
+          method: "POST",
+          headers: { Authorization: `Bearer ${token}`, "Content-Type": "application/json" },
+          body: JSON.stringify({
+            sourceType: draft.kind,
+            pathOrUrl: draft.url ?? draft.text,
+            sourceId: id,
+          }),
+        });
+      }
+      const json = (await res.json()) as {
+        error?: string;
+        title?: string | null;
+        chunkCount?: number;
+      };
+      if (!res.ok) throw new Error(json.error ?? "Ingestion failed.");
+
       setNotebooks((ns) =>
         ns.map((n) =>
           n.id === active.id
-            ? { ...n, sources: n.sources.map((x) => (x.id === src.id ? { ...x, status: "ready" as const } : x)) }
+            ? {
+                ...n,
+                sources: n.sources.map((s) =>
+                  s.id === id
+                    ? {
+                        ...s,
+                        status: "ready" as const,
+                        title: json.title ?? s.title,
+                        meta: json.chunkCount
+                          ? `${s.meta} · ${json.chunkCount} chunks`
+                          : s.meta,
+                      }
+                    : s
+                ),
+              }
             : n
         )
       );
-      void supabase.from("sources").update({ status: "ready" }).eq("id", src.id);
-    }, 2200);
+      setToast({ message: `${json.title ?? draft.title} indexed — ready to chat.`, kind: "info" });
+    } catch (err) {
+      const message = err instanceof Error ? err.message : "Ingestion failed.";
+      setNotebooks((ns) =>
+        ns.map((n) =>
+          n.id === active.id
+            ? {
+                ...n,
+                sources: n.sources.map((s) =>
+                  s.id === id ? { ...s, status: "failed" as const, meta: message.slice(0, 80) } : s
+                ),
+              }
+            : n
+        )
+      );
+      await supabase.from("sources").update({ status: "failed" }).eq("id", id);
+      setToast({ message, kind: "error" });
+    }
   };
 
   const toggleSource = (id: string) => {
-    const next = active.sources.find((s) => s.id === id)?.enabled ?? false;
+    const next = !(active.sources.find((s) => s.id === id)?.enabled ?? false);
     patchActive({
-      sources: active.sources.map((s) => (s.id === id ? { ...s, enabled: !s.enabled } : s)),
+      sources: active.sources.map((s) => (s.id === id ? { ...s, enabled: next } : s)),
     });
-    void supabase.from("sources").update({ enabled: !next }).eq("id", id);
+    void supabase.from("sources").update({ enabled: next }).eq("id", id);
   };
 
   const deleteSource = (id: string) => {
     patchActive({ sources: active.sources.filter((s) => s.id !== id) });
-    void supabase.from("sources").delete().eq("id", id);
+    void supabase.from("sources").delete().eq("id", id); // chunks cascade
   };
 
-  /* ---- chat actions ---- */
+  /* ---------------- chat (search -> rerank -> generate) ---------------- */
 
   const sendChat = (text: string) => {
+    const history = active.chat
+      .filter((m) => !m.error)
+      .slice(-6)
+      .map((m) => ({ role: m.role, text: m.text }));
     patchActive({ chat: [...active.chat, { role: "user", text }] });
     void supabase.from("chat_messages").insert({ notebook_id: active.id, role: "user", text });
-    setThinking(true);
-    const activeSources = active.sources.filter((s) => s.enabled && s.status === "ready");
-    setTimeout(() => {
-      const reply: ChatMsg =
-        activeSources.length === 0
-          ? {
-              role: "assistant",
-              refusal: true,
-              text: "I don't know about this. Nothing related is stated in the sources — attach sources first, then ask.",
-            }
-          : {
-              role: "assistant",
-              notice: true,
-              text: "Your sources are attached and tracked — but the retrieval pipeline isn't connected in this build yet. Grounded, cited answers will appear here once it goes live.",
-            };
-      setNotebooks((ns) =>
-        ns.map((n) => (n.id === active.id ? { ...n, chat: [...n.chat, reply] } : n))
-      );
+
+    const readySources = active.sources.filter((s) => s.enabled && s.status === "ready");
+    if (readySources.length === 0) {
+      const reply: ChatMsg = {
+        role: "assistant",
+        refusal: true,
+        text: "I don't know about this. Nothing related is stated in the sources — attach sources first, then ask.",
+      };
+      patchActive({ chat: [...active.chat, { role: "user", text }, reply] });
       void supabase.from("chat_messages").insert({
         notebook_id: active.id,
         role: "assistant",
         text: reply.text,
-        flag: reply.refusal ? "refusal" : reply.notice ? "notice" : null,
+        flag: "refusal",
       });
+      return;
+    }
+
+    setThinking(true);
+    setStreamingText("");
+
+    (async () => {
+      let finalText: string | null = null;
+      let citations: string[] = [];
+      let errorMessage: string | null = null;
+      try {
+        const token = await accessToken();
+        const res = await fetch("/api/chat", {
+          method: "POST",
+          headers: { Authorization: `Bearer ${token}`, "Content-Type": "application/json" },
+          body: JSON.stringify({
+            query: text,
+            sourceIds: readySources.map((s) => s.id),
+            history,
+          }),
+        });
+
+        if (!res.ok) {
+          const json = (await res.json().catch(() => ({}))) as { error?: string };
+          throw new Error(json.error ?? "Chat failed.");
+        }
+
+        citations = JSON.parse(res.headers.get("X-Citation-Chunk-Ids") ?? "[]") as string[];
+        const reader = res.body?.getReader();
+        if (!reader) throw new Error("No response stream.");
+        const decoder = new TextDecoder();
+        let acc = "";
+        for (;;) {
+          const { done, value } = await reader.read();
+          if (done) break;
+          acc += decoder.decode(value, { stream: true });
+          setStreamingText(acc);
+        }
+        finalText = acc.trim();
+      } catch (err) {
+        errorMessage = err instanceof Error ? err.message : "Chat failed.";
+      }
+
       setThinking(false);
-    }, 1300);
+      setStreamingText(null);
+
+      if (errorMessage) {
+        const reply: ChatMsg = {
+          role: "assistant",
+          text: `Something broke while answering: ${errorMessage}`,
+          error: true,
+        };
+        setNotebooks((ns) =>
+          ns.map((n) => (n.id === active.id ? { ...n, chat: [...n.chat, reply] } : n))
+        );
+        void supabase.from("chat_messages").insert({
+          notebook_id: active.id,
+          role: "assistant",
+          text: reply.text,
+          flag: "error",
+        });
+        return;
+      }
+
+      if (finalText) {
+        const reply: ChatMsg = { role: "assistant", text: finalText, citations };
+        setNotebooks((ns) =>
+          ns.map((n) => (n.id === active.id ? { ...n, chat: [...n.chat, reply] } : n))
+        );
+        void supabase.from("chat_messages").insert({
+          notebook_id: active.id,
+          role: "assistant",
+          text: finalText,
+          citations,
+        });
+      }
+    })();
   };
 
-  /* ---- notebook actions ---- */
+  const openCitation = async (msgIndex: number, n: number) => {
+    const msg = active.chat[msgIndex];
+    const chunkId = msg?.citations?.[n - 1];
+    if (!chunkId) return;
+    setCitation({ n, sourceTitle: "source", content: "", loading: true });
+    try {
+      const token = await accessToken();
+      const res = await fetch(`/api/chunks?id=${chunkId}`, {
+        headers: { Authorization: `Bearer ${token}` },
+      });
+      const json = (await res.json()) as { error?: string; content?: string; sourceTitle?: string };
+      if (!res.ok) throw new Error(json.error ?? "Could not load that citation.");
+      setCitation({
+        n,
+        sourceTitle: json.sourceTitle ?? "source",
+        content: json.content ?? "",
+        loading: false,
+      });
+    } catch (err) {
+      setCitation(null);
+      setToast({
+        message: err instanceof Error ? err.message : "Could not load that citation.",
+        kind: "error",
+      });
+    }
+  };
+
+  /* ---------------- studio ---------------- */
+
+  const runStudio = (type: ArtifactType) => {
+    const readySources = active.sources.filter((s) => s.enabled && s.status === "ready");
+    if (readySources.length === 0 || runningTask) return;
+    setRunningTask(type);
+    setStudioError(null);
+
+    (async () => {
+      try {
+        const token = await accessToken();
+        const res = await fetch("/api/studio", {
+          method: "POST",
+          headers: { Authorization: `Bearer ${token}`, "Content-Type": "application/json" },
+          body: JSON.stringify({ task: type, sourceIds: readySources.map((s) => s.id) }),
+        });
+        const json = (await res.json()) as { error?: string; content?: string };
+        if (!res.ok || !json.content) throw new Error(json.error ?? "Studio task failed.");
+
+        // pick a nice title: quiz JSON carries its own
+        let title = TASK_LABELS[type];
+        if (type === "quiz") {
+          try {
+            const parsed = JSON.parse(json.content) as { title?: string };
+            if (parsed.title) title = parsed.title;
+          } catch {
+            /* keep default */
+          }
+        }
+
+        const artifact: Artifact = {
+          id: crypto.randomUUID(),
+          type,
+          title,
+          content: json.content,
+          createdAt: Date.now(),
+        };
+        const { error: insertError } = await supabase.from("artifacts").insert({
+          id: artifact.id,
+          notebook_id: active.id,
+          type,
+          title,
+          content: json.content,
+        });
+        if (insertError) throw new Error(insertError.message);
+
+        setNotebooks((ns) =>
+          ns.map((n) => (n.id === active.id ? { ...n, artifacts: [...n.artifacts, artifact] } : n))
+        );
+        setOpenArtifact(artifact);
+      } catch (err) {
+        setStudioError(err instanceof Error ? err.message : "Studio task failed.");
+      } finally {
+        setRunningTask(null);
+      }
+    })();
+  };
+
+  const deleteArtifact = (id: string) => {
+    patchActive({ artifacts: active.artifacts.filter((a) => a.id !== id) });
+    void supabase.from("artifacts").delete().eq("id", id);
+  };
+
+  /* ---------------- notebooks ---------------- */
 
   const createNotebook = () => {
     const nb = newNotebook(`Untitled notebook ${notebooks.length + 1}`);
@@ -990,14 +543,19 @@ export default function DashboardPage() {
     const rest = notebooks.filter((n) => n.id !== id);
     setNotebooks(rest);
     if (id === activeId) setActiveId(rest[0].id);
-    // sources + chat cascade in the database
+    // sources, chat, artifacts cascade in the database
     void supabase.from("notebooks").delete().eq("id", id);
   };
 
   const renameNotebook = (title: string) => {
     patchActive({ title });
-    void supabase.from("notebooks").update({ title, updated_at: new Date().toISOString() }).eq("id", active.id);
+    void supabase
+      .from("notebooks")
+      .update({ title, updated_at: new Date().toISOString() })
+      .eq("id", active.id);
   };
+
+  /* ---------------- derived ---------------- */
 
   const readyCount = active?.sources.filter((s) => s.enabled && s.status === "ready").length ?? 0;
 
@@ -1015,10 +573,22 @@ export default function DashboardPage() {
       onRename={renameNotebook}
       onSend={sendChat}
       thinking={thinking}
+      streamingText={streamingText}
       onOpenSidebar={() => setSidebarOpen(true)}
+      onCitation={openCitation}
     />
   );
-  const studioPane = <StudioPane sourceCount={readyCount} />;
+  const studioPane = (
+    <StudioPane
+      sourceCount={readyCount}
+      artifacts={active?.artifacts ?? []}
+      running={runningTask}
+      error={studioError}
+      onRun={runStudio}
+      onOpen={setOpenArtifact}
+      onDeleteArtifact={deleteArtifact}
+    />
+  );
 
   return (
     <div className="flex h-screen flex-col overflow-hidden">
@@ -1026,7 +596,7 @@ export default function DashboardPage() {
       <div aria-hidden className="pointer-events-none fixed inset-0 -z-10 bg-app">
         <div className="bg-grid absolute inset-0" />
       </div>
-      <div aria-hidden className="pointer-events-none fixed inset-0 z-[60] border-2 border-line" />
+      <div aria-hidden className="pointer-events-none fixed inset-0 z-60 border-2 border-line" />
 
       {/* top bar */}
       <header className="relative z-30 flex h-14 shrink-0 items-center justify-between border-b-2 border-line bg-surface px-4 sm:px-5">
@@ -1039,9 +609,7 @@ export default function DashboardPage() {
               height={28}
               className="h-7 w-7 transition-transform group-hover:-translate-y-0.5"
             />
-            <span className="font-mono text-sm font-bold tracking-tight text-app">
-              OpenbookLM
-            </span>
+            <span className="font-mono text-sm font-bold tracking-tight text-app">OpenbookLM</span>
           </a>
           <span className="hidden h-6 w-0.5 bg-line md:block" aria-hidden />
           <span className="hidden truncate font-mono text-[12px] text-muted-c md:block">
@@ -1051,7 +619,7 @@ export default function DashboardPage() {
 
         <div className="flex items-center gap-2">
           <span className="hidden h-9 items-center gap-1.5 rounded-sm border-2 border-line bg-surface-2 px-2.5 font-mono text-[10px] text-muted-c sm:inline-flex">
-            <span className="h-1.5 w-1.5 rounded-full bg-emerald-500" />
+            <span className={`h-1.5 w-1.5 rounded-full ${readyCount > 0 ? "bg-emerald-500" : "bg-muted-c"}`} />
             {readyCount} source{readyCount === 1 ? "" : "s"} active
           </span>
           <ThemeToggle />
@@ -1068,9 +636,7 @@ export default function DashboardPage() {
             </button>
             {menuOpen && (
               <div className="anim-rise absolute right-0 top-full z-50 mt-1.5 w-44 overflow-hidden rounded-md border-2 border-line bg-surface shadow-hard-lg">
-                <p className="border-b border-line px-3 py-2 font-mono text-[10px] text-muted-c">
-                  {email}
-                </p>
+                <p className="border-b border-line px-3 py-2 font-mono text-[10px] text-muted-c">{email}</p>
                 <button
                   type="button"
                   onClick={signOut}
@@ -1108,22 +674,18 @@ export default function DashboardPage() {
 
       {/* main: blurs behind the notebook sidebar */}
       <main className="relative z-10 min-h-0 flex-1">
-        <div
-          className={`h-full transition-[filter] duration-200 ${
-            sidebarOpen ? "blur-[2px]" : ""
-          }`}
-        >
+        <div className={`h-full transition-[filter] duration-200 ${sidebarOpen ? "blur-[2px]" : ""}`}>
           {/* desktop */}
           <div className="hidden h-full md:block">
             <Group orientation="horizontal" className="h-full">
               <Panel defaultSize={25} minSize={15} className="border-r-2 border-line bg-surface">
                 {sourcesPane}
               </Panel>
-              <Separator className="group relative w-0.5 cursor-col-resize bg-line transition-colors hover:bg-[var(--accent)]" />
+              <Separator className="group relative w-0.5 cursor-col-resize bg-line transition-colors hover:bg-(--accent)" />
               <Panel defaultSize={55} minSize={30} className="bg-surface">
                 {chatPane}
               </Panel>
-              <Separator className="group relative w-0.5 cursor-col-resize bg-line transition-colors hover:bg-[var(--accent)]" />
+              <Separator className="group relative w-0.5 cursor-col-resize bg-line transition-colors hover:bg-(--accent)" />
               <Panel defaultSize={20} minSize={14} className="border-l-2 border-line bg-surface">
                 {studioPane}
               </Panel>
@@ -1138,7 +700,7 @@ export default function DashboardPage() {
           </div>
         </div>
 
-        {sidebarOpen && authChecked && (
+        {sidebarOpen && authChecked && active && (
           <NotebookSidebar
             notebooks={notebooks}
             activeId={activeId}
@@ -1153,13 +715,32 @@ export default function DashboardPage() {
         )}
       </main>
 
-      {/* add-source modal */}
+      {/* modals */}
       {addKind && (
-        <AddSourceModal
-          kind={addKind}
-          onClose={() => setAddKind(null)}
-          onAdd={addSource}
+        <AddSourceModal kind={addKind} onClose={() => setAddKind(null)} onAdd={ingestDraft} />
+      )}
+      {openArtifact && <ArtifactModal artifact={openArtifact} onClose={() => setOpenArtifact(null)} />}
+      {citation && (
+        <CitationModal
+          citationNumber={citation.n}
+          sourceTitle={citation.sourceTitle}
+          content={citation.loading ? "loading the passage…" : citation.content}
+          onClose={() => setCitation(null)}
         />
+      )}
+
+      {/* toast */}
+      {toast && (
+        <div
+          className={`anim-rise fixed bottom-5 left-1/2 z-90 flex max-w-md -translate-x-1/2 items-start gap-2 rounded-md border-2 px-3.5 py-2.5 font-mono text-[11.5px] leading-relaxed shadow-hard-lg ${
+            toast.kind === "error"
+              ? "border-rose-600 bg-rose-500/10 text-rose-700 dark:text-rose-400"
+              : "border-line bg-surface text-app"
+          }`}
+        >
+          <span className={`mt-1 h-1.5 w-1.5 shrink-0 rounded-full ${toast.kind === "error" ? "bg-rose-600" : "bg-emerald-500"}`} />
+          {toast.message}
+        </div>
       )}
     </div>
   );

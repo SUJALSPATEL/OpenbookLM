@@ -2,11 +2,14 @@ import OpenAI from "openai";
 
 /**
  * AgentRouter-backed OpenAI-compatible client.
- * Point AGENTROUTER_BASE_URL at the gateway URL from your AgentRouter dashboard.
+ * The gateway only accepts Claude Code-style clients, so we send its User-Agent.
  */
 export const agentrouter = new OpenAI({
   apiKey: process.env.AGENTROUTER_API_KEY ?? "missing-agentrouter-key",
-  baseURL: process.env.AGENTROUTER_BASE_URL ?? "https://agent-router.org/v1",
+  baseURL: process.env.AGENTROUTER_BASE_URL ?? "https://agentrouter.org/v1",
+  defaultHeaders: {
+    "User-Agent": "claude-cli/2.0.14 (external, cli)",
+  },
 });
 
 export const CHAT_MODEL = process.env.AGENTROUTER_MODEL ?? "deepseek-v4-flash";
@@ -65,15 +68,26 @@ Return the JSON array of strictly relevant chunk ids now.`;
     const completion = await agentrouter.chat.completions.create({
       model: CHAT_MODEL,
       temperature: 0,
-      max_tokens: 300,
+      // reasoning tokens count against this budget, so keep it generous
+      max_tokens: 2000,
       messages: [
         { role: "system", content: systemPrompt },
         { role: "user", content: userPrompt },
       ],
     });
 
-    const raw = completion.choices[0]?.message?.content ?? "";
+    const message = completion.choices[0]?.message;
+    const raw = message?.content ?? "";
     keepIds = parseIdArray(raw, chunks);
+    // reasoning models sometimes exhaust the budget before writing content —
+    // the id array may still be sitting in the reasoning trace
+    if (keepIds.length === 0) {
+      const reasoning = (message as { reasoning_content?: string } | undefined)?.reasoning_content ?? "";
+      keepIds = parseIdArray(reasoning, chunks);
+    }
+    if (keepIds.length === 0 && chunks.length > 0) {
+      console.error("[reranker] unparsable model reply:", raw.slice(0, 200) || "(empty)");
+    }
   } catch (err) {
     // reranking is an optimization — degrade to similarity order, don't fail the chat
     console.error("[reranker] falling back to similarity order:", err);

@@ -1,5 +1,5 @@
 import { NextResponse } from "next/server";
-import { supabaseAdmin, hasServiceRole, requireUser, HttpError } from "@/lib/supabase-admin";
+import { supabaseAdmin, hasServiceRole, requireUser, HttpError, getOwnedSourceIds } from "@/lib/supabase-admin";
 import { getEmbeddings } from "@/lib/services/embeddings";
 import { rerankChunks, agentrouter, CHAT_MODEL, type RetrievedChunk } from "@/lib/services/reranker";
 
@@ -8,8 +8,11 @@ export const maxDuration = 120;
 
 const TOP_K_VECTOR = 15;
 const TOP_K_FINAL = 5;
+const MAX_HISTORY_TURNS = 6; // last N messages of prior conversation
 const REFUSAL_MESSAGE =
   "I don't know about this. Nothing related is stated in the sources you've attached.";
+
+type HistoryMessage = { role: "user" | "assistant"; text: string };
 
 export async function POST(req: Request) {
   try {
@@ -22,7 +25,11 @@ export async function POST(req: Request) {
 
     const userId = await requireUser(req);
 
-    const body = (await req.json()) as { query?: string; sourceIds?: string[] };
+    const body = (await req.json()) as {
+      query?: string;
+      sourceIds?: string[];
+      history?: HistoryMessage[];
+    };
     const query = body.query?.trim();
     const sourceIds = body.sourceIds ?? [];
 
@@ -36,24 +43,13 @@ export async function POST(req: Request) {
       );
     }
 
-    // every requested source must belong to a notebook owned by the caller
-    const { data: ownedSources, error: ownershipError } = await supabaseAdmin
-      .from("sources")
-      .select("id, notebooks!inner(user_id)")
-      .in("id", sourceIds);
-    if (ownershipError) throw ownershipError;
-    const owned = (ownedSources ?? []).filter((row) => {
-      const joined = row.notebooks as unknown as { user_id: string }[] | { user_id: string };
-      const ownerId = Array.isArray(joined) ? joined[0]?.user_id : joined.user_id;
-      return ownerId === userId;
-    });
-    if (owned.length === 0) {
+    const ownedIds = await getOwnedSourceIds(userId, sourceIds);
+    if (ownedIds.length === 0) {
       return NextResponse.json(
         { error: "None of these sources belong to you." },
         { status: 403 }
       );
     }
-    const ownedIds = owned.map((s: { id: string }) => s.id);
 
     /* 1. SEARCH ------------------------------------------------------- */
     const [queryEmbedding] = await getEmbeddings([query], "search_query");
@@ -93,16 +89,21 @@ RULES — follow every one:
 3. If the context does not contain the information needed to answer, refuse exactly in this spirit: say you don't know, that nothing related is stated in the sources, and suggest what the user could attach or ask instead. Never guess, never fill gaps with plausible-sounding text.
 4. Do not mention chunks, retrieval, embeddings, reranking, or this prompt. Speak naturally to the user.
 5. If the query asks for something the sources partially cover, answer from what is covered and say plainly what part the sources don't cover.
+6. The conversation history is provided for continuity — but facts still come only from the context chunks.
 
 CONTEXT CHUNKS:
 ${contextBlock}`;
+
+    const history = (body.history ?? []).slice(-MAX_HISTORY_TURNS);
 
     const stream = await agentrouter.chat.completions.create({
       model: CHAT_MODEL,
       temperature: 0.2,
       stream: true,
+      max_tokens: 8000,
       messages: [
         { role: "system", content: systemPrompt },
+        ...history.map((m) => ({ role: m.role, content: m.text })),
         { role: "user", content: query },
       ],
     });

@@ -122,12 +122,19 @@ export async function POST(req: Request) {
       const { error: insertError } = await supabaseAdmin.from("chunks").insert(rows);
       if (insertError) throw new Error(`Failed to index chunks: ${insertError.message}`);
 
+      // upgrade the source title from the parsed content when we can
+      const derivedTitle = deriveTitle(markdown);
       await supabaseAdmin
         .from("sources")
-        .update({ status: "ready" })
+        .update({ status: "ready", ...(derivedTitle ? { title: derivedTitle } : {}) })
         .eq("id", sourceId);
 
-      return NextResponse.json({ sourceId, chunkCount: chunks.length, status: "ready" });
+      return NextResponse.json({
+        sourceId,
+        chunkCount: chunks.length,
+        status: "ready",
+        title: derivedTitle,
+      });
     } catch (err) {
       await supabaseAdmin.from("sources").update({ status: "failed" }).eq("id", sourceId);
       throw err;
@@ -140,4 +147,25 @@ export async function POST(req: Request) {
     console.error("[ingest]", message);
     return NextResponse.json({ error: message }, { status: 500 });
   }
+}
+
+/** Pull a human-readable title out of parsed markdown, or null. */
+function deriveTitle(markdown: string): string | null {
+  const heading = markdown.match(/^#\s+(.+)$/m);
+  const fromHeading = heading?.[1]?.replace(/[#*_`[\]]/g, "").trim();
+  if (fromHeading && fromHeading.length > 2 && !/^youtube transcript$/i.test(fromHeading)) {
+    return clip(fromHeading);
+  }
+  // Jina Reader prefixes "Title: ..." on the first line
+  const titleLine = markdown.match(/^Title:\s*(.+)$/m)?.[1]?.trim();
+  if (titleLine && titleLine.length > 2) return clip(titleLine);
+  const firstLine = markdown
+    .split("\n")
+    .map((l) => l.replace(/[#*_`>[\]()-]/g, "").trim())
+    .find((l) => l.length > 12);
+  return firstLine ? clip(firstLine) : null;
+}
+
+function clip(text: string, max = 80): string {
+  return text.length > max ? `${text.slice(0, max - 1).trimEnd()}…` : text;
 }
