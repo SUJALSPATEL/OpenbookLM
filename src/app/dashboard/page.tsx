@@ -197,6 +197,13 @@ export default function DashboardPage() {
     return () => clearTimeout(t);
   }, [toast]);
 
+  // auto-hide studio errors
+  useEffect(() => {
+    if (!studioError) return;
+    const t = setTimeout(() => setStudioError(null), 5000);
+    return () => clearTimeout(t);
+  }, [studioError]);
+
   const active = notebooks.find((n) => n.id === activeId) ?? notebooks[0];
 
   const patchActive = useCallback(

@@ -132,11 +132,11 @@ export async function POST(req: Request) {
       return NextResponse.json({ error: NO_CHUNKS_MESSAGE }, { status: 400 });
     }
 
-    /* 2. rerank to the strictly relevant subset */
-    const context = (await rerankChunks(config.retrievalQuery, retrieved)).slice(0, config.keepK);
-    if (context.length === 0) {
-      return NextResponse.json({ error: NO_CHUNKS_MESSAGE }, { status: 400 });
-    }
+    /* 2. rerank to the most relevant subset (task queries are synthetic, so an
+           empty rerank falls back to retrieval order instead of failing) */
+    let context = await rerankChunks(config.retrievalQuery, retrieved);
+    if (context.length === 0) context = retrieved.slice(0, config.keepK);
+    context = context.slice(0, config.keepK);
 
     /* 3. generate the artifact */
     const contextBlock = context

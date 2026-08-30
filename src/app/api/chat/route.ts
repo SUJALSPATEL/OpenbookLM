@@ -70,11 +70,12 @@ export async function POST(req: Request) {
     }
 
     /* 2. RERANK ------------------------------------------------------- */
-    const reranked = await rerankChunks(query, retrieved);
-    const context = reranked.slice(0, TOP_K_FINAL);
-    if (context.length === 0) {
-      return plainTextResponse(REFUSAL_MESSAGE);
-    }
+    // an empty rerank falls back to similarity order — the generation model's
+    // system prompt handles "nothing relevant here" refusal better than a
+    // precision filter judging 800-char excerpts ever can
+    let context = await rerankChunks(query, retrieved);
+    if (context.length === 0) context = retrieved;
+    context = context.slice(0, TOP_K_FINAL);
 
     /* 3. GENERATE (streamed) ------------------------------------------ */
     const contextBlock = context

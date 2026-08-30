@@ -91,10 +91,13 @@ export async function POST(req: Request) {
     try {
       /* 1. EXTRACT -------------------------------------------------- */
       let markdown: string;
+      let extractedTitle: string | null = null;
       if (sourceType === "pdf" && fileBuffer) {
         markdown = await parseFile(fileBuffer, fileName || "document.pdf");
       } else if (sourceType === "youtube") {
-        markdown = await parseYouTube(pathOrUrl);
+        const yt = await parseYouTube(pathOrUrl);
+        markdown = yt.markdown;
+        extractedTitle = yt.title;
       } else if (sourceType === "text") {
         markdown = pathOrUrl;
       } else {
@@ -123,7 +126,7 @@ export async function POST(req: Request) {
       if (insertError) throw new Error(`Failed to index chunks: ${insertError.message}`);
 
       // upgrade the source title from the parsed content when we can
-      const derivedTitle = deriveTitle(markdown);
+      const derivedTitle = extractedTitle ?? deriveTitle(markdown);
       await supabaseAdmin
         .from("sources")
         .update({ status: "ready", ...(derivedTitle ? { title: derivedTitle } : {}) })
