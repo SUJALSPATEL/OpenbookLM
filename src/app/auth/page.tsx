@@ -25,6 +25,17 @@ export default function AuthPage() {
     });
   }, [router]);
 
+  // OAuth failures come back as /auth?auth_error=... from the callback route
+  useEffect(() => {
+    const authError = new URLSearchParams(window.location.search).get(
+      "auth_error"
+    );
+    if (authError) {
+      setError(authError);
+      window.history.replaceState({}, "", "/auth");
+    }
+  }, []);
+
   const submit = async (e: React.FormEvent) => {
     e.preventDefault();
     setError(null);
