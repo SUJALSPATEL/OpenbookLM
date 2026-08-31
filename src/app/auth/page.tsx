@@ -1,5 +1,6 @@
 "use client";
 
+import Link from 'next/link';
 import { useEffect, useState } from "react";
 import Image from "next/image";
 import { useRouter } from "next/navigation";
@@ -99,10 +100,10 @@ export default function AuthPage() {
 
       <div className="mx-auto flex min-h-screen max-w-6xl flex-col px-5 py-8 sm:px-8">
         {/* back link */}
-        <a href="/" className="group flex items-center gap-2 self-start font-mono text-[13px] text-muted-c transition-colors hover:text-app">
+        <Link href="/" className="group flex items-center gap-2 self-start font-mono text-[13px] text-muted-c transition-colors hover:text-app">
           <IconArrowRight className="h-4 w-4 rotate-180 transition-transform group-hover:-translate-x-1" />
           back to home
-        </a>
+        </Link>
 
         {/* two-column body */}
         <div className="grid flex-1 items-center gap-12 py-10 lg:grid-cols-2 lg:gap-16">

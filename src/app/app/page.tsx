@@ -18,7 +18,7 @@ export default function AppPage() {
         Google sign-in, grounded answers, and one-click artifacts.
       </p>
       <p className="mt-2 font-mono text-[12px] text-muted-c">
-        // auth · RLS · ingestion → in the build
+          {/*auth · RLS · ingestion → in the build*/}
       </p>
       <Link
         href="/"

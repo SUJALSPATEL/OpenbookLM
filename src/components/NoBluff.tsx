@@ -37,7 +37,7 @@ export default function NoBluff() {
             <div className="mt-6 rounded-lg border-2 border-line bg-surface p-5 font-mono text-[12.5px] leading-relaxed shadow-hard">
               <div className="flex gap-2 text-app">
                 <span className="text-muted-c">$</span>
-                <span>ask "what's the capital of France?"</span>
+                <span>{`ask "what's the capital of France?"`}</span>
               </div>
               <div className="mt-3 space-y-1.5 text-muted-c">
                 <p>· retrieval → 0 passages cleared the gate</p>
@@ -49,7 +49,7 @@ export default function NoBluff() {
 
               <div className="mt-5 flex gap-2 text-app">
                 <span className="text-muted-c">$</span>
-                <span>ask "define self-attention"</span>
+                <span>{`ask "define self-attention"`}</span>
               </div>
               <div className="mt-3 space-y-1.5 text-muted-c">
                 <p>· retrieval → top-k 6 · rerank 6 · gate passed</p>

@@ -1,5 +1,6 @@
 "use client";
 
+import Link from 'next/link';
 import { useCallback, useEffect, useState } from "react";
 import Image from "next/image";
 import { useRouter } from "next/navigation";
@@ -835,7 +836,7 @@ export default function DashboardPage() {
       {/* top bar */}
       <header className="relative z-30 flex h-14 shrink-0 items-center justify-between border-b-2 border-line bg-surface px-4 sm:px-5">
         <div className="flex items-center gap-4">
-          <a href="/" className="group flex items-center gap-2.5">
+          <Link href="/" className="group flex items-center gap-2.5">
             <Image
               src="/logo.png"
               alt="OpenbookLM Logo"
@@ -844,7 +845,7 @@ export default function DashboardPage() {
               className="h-7 w-7 transition-transform group-hover:-translate-y-0.5"
             />
             <span className="font-mono text-sm font-bold tracking-tight text-app">OpenbookLM</span>
-          </a>
+          </Link>
           <span className="hidden h-6 w-0.5 bg-line md:block" aria-hidden />
           <span className="hidden truncate font-mono text-[12px] text-muted-c md:block">
             {authChecked ? (name ?? email ?? "") : "…"}
