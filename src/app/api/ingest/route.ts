@@ -1,6 +1,6 @@
 import { NextResponse } from "next/server";
 import { supabaseAdmin, hasServiceRole, requireUser, HttpError } from "@/lib/supabase-admin";
-import { parseFile, parseUrl, parseYouTube } from "@/lib/services/parsers";
+import { parseFile, parseUrl, parseYouTube, isYouTubeUrl } from "@/lib/services/parsers";
 import { getEmbeddings } from "@/lib/services/embeddings";
 import { chunkText } from "@/lib/services/chunker";
 
@@ -92,13 +92,26 @@ export async function POST(req: Request) {
       /* 1. EXTRACT -------------------------------------------------- */
       let markdown: string;
       let extractedTitle: string | null = null;
-      if (sourceType === "pdf" && fileBuffer) {
+
+      // A YouTube link pasted into the generic "URL" kind must behave like the
+      // dedicated YouTube kind: a real transcript, not Jina Reader's scrape of
+      // the watch page (comments, recommendations, bot walls) — junk the model
+      // can barely answer from and that can trip the gateway's content filter.
+      // Detect it up front and re-tag the source so the parse and the UI both
+      // treat it as a video.
+      let effectiveType = sourceType;
+      if (sourceType === "url" && isYouTubeUrl(pathOrUrl)) {
+        effectiveType = "youtube";
+        await supabaseAdmin.from("sources").update({ kind: "youtube" }).eq("id", sourceId);
+      }
+
+      if (effectiveType === "pdf" && fileBuffer) {
         markdown = await parseFile(fileBuffer, fileName || "document.pdf");
-      } else if (sourceType === "youtube") {
+      } else if (effectiveType === "youtube") {
         const yt = await parseYouTube(pathOrUrl);
         markdown = yt.markdown;
         extractedTitle = yt.title;
-      } else if (sourceType === "text") {
+      } else if (effectiveType === "text") {
         markdown = pathOrUrl;
       } else {
         markdown = await parseUrl(pathOrUrl);
@@ -137,6 +150,7 @@ export async function POST(req: Request) {
         chunkCount: chunks.length,
         status: "ready",
         title: derivedTitle,
+        kind: effectiveType,
       });
     } catch (err) {
       await supabaseAdmin.from("sources").update({ status: "failed" }).eq("id", sourceId);

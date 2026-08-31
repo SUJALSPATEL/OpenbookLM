@@ -74,7 +74,7 @@ Return the JSON array of relevant chunk id strings now.`;
       ],
     });
 
-    const message = completion.choices[0]?.message;
+    const message = completion.choices?.[0]?.message;
     const raw = message?.content ?? "";
     keepIds = parseIdArray(raw, chunks);
     // reasoning models sometimes exhaust the budget before writing content —

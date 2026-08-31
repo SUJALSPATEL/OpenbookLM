@@ -108,12 +108,33 @@ export async function parseUrl(url: string): Promise<string> {
 /* YouTube transcripts                                                 */
 /* ------------------------------------------------------------------ */
 
+/**
+ * True when the string is a real YouTube video URL (watch / shorts / embed /
+ * live / youtu.be). Used to catch YouTube links pasted into the generic URL
+ * source kind so they get a real transcript instead of Jina Reader's page
+ * scrape. Deliberately does NOT match bare 11-char ids — that shortcut stays
+ * exclusive to the dedicated YouTube kind, where a bare id is an intentional
+ * input, not a URL-field mistake.
+ */
+export function isYouTubeUrl(input: string): boolean {
+  const trimmed = input.trim();
+  return [
+    /(?:youtube\.com\/watch\?(?:.*&)?v=)[\w-]{11}/i,
+    /(?:youtu\.be\/)[\w-]{11}/i,
+    /(?:youtube\.com\/shorts\/)[\w-]{11}/i,
+    /(?:youtube\.com\/embed\/)[\w-]{11}/i,
+    /(?:youtube-nocookie\.com\/embed\/)[\w-]{11}/i,
+    /(?:youtube\.com\/live\/)[\w-]{11}/i,
+  ].some((p) => p.test(trimmed));
+}
+
 function extractVideoId(videoUrl: string): string {
   const patterns = [
     /(?:youtube\.com\/watch\?(?:.*&)?v=)([\w-]{11})/i,
     /(?:youtu\.be\/)([\w-]{11})/i,
     /(?:youtube\.com\/shorts\/)([\w-]{11})/i,
     /(?:youtube\.com\/embed\/)([\w-]{11})/i,
+    /(?:youtube-nocookie\.com\/embed\/)([\w-]{11})/i,
     /(?:youtube\.com\/live\/)([\w-]{11})/i,
   ];
   for (const p of patterns) {

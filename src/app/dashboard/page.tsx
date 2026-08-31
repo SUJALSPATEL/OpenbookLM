@@ -395,6 +395,7 @@ export default function DashboardPage() {
         error?: string;
         title?: string | null;
         chunkCount?: number;
+        kind?: string;
       };
       if (!res.ok) throw new Error(json.error ?? "Ingestion failed.");
 
@@ -409,6 +410,7 @@ export default function DashboardPage() {
                         ...s,
                         status: "ready" as const,
                         title: json.title ?? s.title,
+                        kind: (json.kind as SourceKind) ?? s.kind,
                         meta: json.chunkCount
                           ? `${s.meta} · ${json.chunkCount} chunks`
                           : s.meta,

@@ -157,7 +157,7 @@ ${contextBlock}`;
         let acc = "";
         try {
           for await (const part of stream) {
-            const delta = part.choices[0]?.delta?.content;
+            const delta = part.choices?.[0]?.delta?.content;
             if (delta) {
               acc += delta;
               controller.enqueue(encoder.encode(delta));

@@ -167,7 +167,10 @@ ${contextBlock}`;
       ],
     });
 
-    const content = completion.choices[0]?.message?.content?.trim() ?? "";
+    // The gateway can answer 200 without a usable body (missing/empty choices).
+    // Guard every level so a malformed reply is a clean message, never a raw
+    // "Cannot read properties of undefined (reading '0')".
+    const content = completion.choices?.[0]?.message?.content?.trim() ?? "";
     if (!content) {
       throw new Error("The model returned an empty artifact. Try again.");
     }
@@ -204,8 +207,26 @@ ${contextBlock}`;
     }
     const message = err instanceof Error ? err.message : "Studio task failed.";
     console.error("[studio]", message);
+    // The gateway's content filter rejects some scraped/junk pages. Surface a
+    // fixable message instead of leaking the raw gateway error.
+    if (isContentFilterError(message)) {
+      return NextResponse.json(
+        {
+          error:
+            "The source content was blocked by the model's content policy. This usually means the page didn't extract cleanly — re-add it as the right source type (a YouTube link as \"YouTube\", not \"URL\") so it gets a proper transcript.",
+        },
+        { status: 422 }
+      );
+    }
     return NextResponse.json({ error: message }, { status: 500 });
   }
+}
+
+/** True when the gateway rejected the request for content-policy reasons. */
+function isContentFilterError(message: string): boolean {
+  return /sensitive\s*words?|content\s*polic|content\s*filter|flagged|prohibited|inappropriate/i.test(
+    message
+  );
 }
 
 /** Extract a JSON object from model output, tolerating fences and prose. */
