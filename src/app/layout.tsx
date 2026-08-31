@@ -42,8 +42,17 @@ export default function RootLayout({
   children,
 }: Readonly<{ children: React.ReactNode }>) {
   return (
-    <html lang="en" className={`${grotesk.variable} ${archivo.variable} ${mono.variable}`}>
+    <html 
+      lang="en" 
+      className={`${grotesk.variable} ${archivo.variable} ${mono.variable}`}
+      suppressHydrationWarning
+    >
       <head>
+        <meta name="color-scheme" content="light dark" />
+        {/* the app ships its own light + dark themes (ThemeToggle), so
+            auto-darkening extensions like Dark Reader must not re-theme it —
+            double-darkening turns the cream text gray and the orange accent green */}
+        <meta name="darkreader-lock" />
         <script dangerouslySetInnerHTML={{ __html: themeInit }} />
       </head>
       <body className="font-sans antialiased">{children}</body>

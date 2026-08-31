@@ -1,5 +1,9 @@
 @import "tailwindcss";
 
+/* dark: variants follow the .dark class, not the OS preference — the app
+   owns its theme via ThemeToggle, and the two must never disagree */
+@custom-variant dark (&:where(.dark, .dark *));
+
 @theme {
   --font-sans: var(--font-grotesk), ui-sans-serif, system-ui, -apple-system, "Segoe UI", sans-serif;
   --font-mono: var(--font-spacemono), ui-monospace, "Cascadia Code", "SF Mono", Menlo, monospace;
@@ -8,6 +12,10 @@
 
 /* ---------- Semantic tokens: paper & ink ---------- */
 :root {
+  /* tells the browser this page paints its own light theme — Chrome's
+     "auto dark mode for web contents" then leaves it alone instead of
+     double-darkening it */
+  color-scheme: light;
   --bg: #f0ebe0;
   --surface: #faf7ef;
   --surface-2: #e4ddca;
@@ -24,6 +32,10 @@
 }
 
 .dark {
+  /* same opt-out for dark: the page IS dark already, so the browser must
+     not invert/darken it a second time (which turns cream text gray and
+     the orange accent green) */
+  color-scheme: dark;
   --bg: #131109;
   --surface: #1c1912;
   --surface-2: #26221a;

@@ -46,6 +46,23 @@ export class HttpError extends Error {
 }
 
 /**
+ * True when the notebook belongs to the user — service role bypasses RLS,
+ * so ownership must be checked explicitly before server-side writes.
+ */
+export async function notebookBelongsToUser(
+  userId: string,
+  notebookId: string
+): Promise<boolean> {
+  const { data } = await supabaseAdmin
+    .from("notebooks")
+    .select("id")
+    .eq("id", notebookId)
+    .eq("user_id", userId)
+    .maybeSingle();
+  return Boolean(data);
+}
+
+/**
  * Filter sourceIds down to those belonging to notebooks owned by the user.
  * Returns [] when none of the ids are theirs.
  */

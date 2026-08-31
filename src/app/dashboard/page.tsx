@@ -42,6 +42,51 @@ function newNotebook(title = "Untitled notebook"): Notebook {
   };
 }
 
+/* ---------------- db row -> app state mappers ---------------- */
+
+type SourceRow = {
+  id: string;
+  title: string;
+  meta: string;
+  kind: SourceKind;
+  status: Source["status"];
+  enabled: boolean;
+};
+
+function mapSourceRow(r: SourceRow): Source {
+  return { id: r.id, title: r.title, meta: r.meta, kind: r.kind, status: r.status, enabled: r.enabled };
+}
+
+type MsgRow = {
+  role: "user" | "assistant";
+  text: string;
+  flag: string | null;
+  citations: string[] | null;
+};
+
+function mapMsgRow(r: MsgRow): ChatMsg {
+  return {
+    role: r.role,
+    text: r.text,
+    refusal: r.flag === "refusal",
+    notice: r.flag === "notice",
+    error: r.flag === "error",
+    citations: Array.isArray(r.citations) ? r.citations : undefined,
+  };
+}
+
+type ArtifactRow = {
+  id: string;
+  type: ArtifactType;
+  title: string;
+  content: string;
+  created_at: string;
+};
+
+function mapArtifactRow(r: ArtifactRow): Artifact {
+  return { id: r.id, type: r.type, title: r.title, content: r.content, createdAt: new Date(r.created_at).getTime() };
+}
+
 type CitationState = {
   n: number;
   sourceTitle: string;
@@ -106,12 +151,13 @@ export default function DashboardPage() {
       // first visit -> seed one empty notebook for this account
       if (nbs.length === 0) {
         const nb = newNotebook();
-        await supabase.from("notebooks").insert({
+        const { error: seedErr } = await supabase.from("notebooks").insert({
           id: nb.id,
           user_id: u.id,
           title: nb.title,
           created_at: new Date(nb.createdAt).toISOString(),
         });
+        if (seedErr) setToast({ message: `Could not create your first notebook: ${seedErr.message}`, kind: "error" });
         nbs = [nb];
       }
 
@@ -127,61 +173,82 @@ export default function DashboardPage() {
       ]);
 
       const byId = new Map(nbs.map((n) => [n.id, n]));
-      for (const r of (srcRows ?? []) as {
-        notebook_id: string;
-        id: string;
-        title: string;
-        meta: string;
-        kind: SourceKind;
-        status: Source["status"];
-        enabled: boolean;
-      }[]) {
-        byId.get(r.notebook_id)?.sources.push({
-          id: r.id,
-          title: r.title,
-          meta: r.meta,
-          kind: r.kind,
-          status: r.status,
-          enabled: r.enabled,
-        });
+      for (const r of (srcRows ?? []) as (SourceRow & { notebook_id: string })[]) {
+        byId.get(r.notebook_id)?.sources.push(mapSourceRow(r));
       }
-      for (const r of (msgRows ?? []) as {
-        notebook_id: string;
-        role: "user" | "assistant";
-        text: string;
-        flag: string | null;
-        citations: string[] | null;
-      }[]) {
-        byId.get(r.notebook_id)?.chat.push({
-          role: r.role,
-          text: r.text,
-          refusal: r.flag === "refusal",
-          notice: r.flag === "notice",
-          error: r.flag === "error",
-          citations: Array.isArray(r.citations) ? r.citations : undefined,
-        });
+      for (const r of (msgRows ?? []) as (MsgRow & { notebook_id: string })[]) {
+        byId.get(r.notebook_id)?.chat.push(mapMsgRow(r));
       }
-      for (const r of (artRows ?? []) as {
-        notebook_id: string;
-        id: string;
-        type: ArtifactType;
-        title: string;
-        content: string;
-        created_at: string;
-      }[]) {
-        byId.get(r.notebook_id)?.artifacts.push({
-          id: r.id,
-          type: r.type,
-          title: r.title,
-          content: r.content,
-          createdAt: new Date(r.created_at).getTime(),
-        });
+      for (const r of (artRows ?? []) as (ArtifactRow & { notebook_id: string })[]) {
+        byId.get(r.notebook_id)?.artifacts.push(mapArtifactRow(r));
       }
 
       setNotebooks(nbs);
-      setActiveId(nbs[nbs.length - 1].id);
+
+      // Per browser session: refreshes keep the same workspace, but every
+      // fresh login lands on a brand-new notebook — the previous ones stay
+      // in the notebook history sidebar with all their sources, chat, and
+      // studio artifacts (all persisted in Supabase under this account).
+      const sessionKey = `oblm-workspace-${u.id}`;
+      let remembered: string | null = null;
+      try {
+        remembered = sessionStorage.getItem(sessionKey);
+      } catch {
+        /* private mode — treat as fresh */
+      }
+
+      let activeNotebookId =
+        remembered && nbs.some((n) => n.id === remembered) ? remembered : null;
+
+      if (!activeNotebookId) {
+        const newest = nbs[nbs.length - 1];
+        const untouched =
+          newest &&
+          newest.sources.length === 0 &&
+          newest.chat.length === 0 &&
+          newest.artifacts.length === 0;
+        if (untouched) {
+          // newest notebook was never used — start there instead of stacking empties
+          activeNotebookId = newest.id;
+        } else {
+          // previous session had content -> open a fresh notebook for this login
+          const nb = newNotebook(`Untitled notebook ${nbs.length + 1}`);
+          const { error: freshErr } = await supabase.from("notebooks").insert({
+            id: nb.id,
+            user_id: u.id,
+            title: nb.title,
+            created_at: new Date(nb.createdAt).toISOString(),
+          });
+          if (freshErr) {
+            // no phantom notebooks — stay in the newest one and say why
+            setToast({ message: `Could not start a new notebook: ${freshErr.message}`, kind: "error" });
+            activeNotebookId = newest.id;
+          } else {
+            nbs = [...nbs, nb];
+            activeNotebookId = nb.id;
+          }
+        }
+      }
+
+      try {
+        sessionStorage.setItem(sessionKey, activeNotebookId);
+      } catch {
+        /* private mode — refreshes will just pick the newest empty notebook */
+      }
+      setNotebooks(nbs);
+      setActiveId(activeNotebookId);
     });
   }, [router]);
+
+  // keep the remembered workspace in sync as the user switches notebooks
+  useEffect(() => {
+    if (!activeId || !uid) return;
+    try {
+      sessionStorage.setItem(`oblm-workspace-${uid}`, activeId);
+    } catch {
+      /* private mode */
+    }
+  }, [activeId, uid]);
 
   // keep activeId pointing at something
   useEffect(() => {
@@ -217,7 +284,54 @@ export default function DashboardPage() {
     return data.session?.access_token ?? null;
   };
 
+  /**
+   * Re-fetches one notebook's sources, chat, and artifacts straight from
+   * Supabase and replaces the in-memory copy — so whatever the database says
+   * is what the dashboard shows. Called whenever a notebook is opened from
+   * the history sidebar: deleted sources can never linger, and rows added
+   * elsewhere show up.
+   */
+  const refreshNotebook = useCallback(async (id: string) => {
+    const [{ data: srcRows, error: srcErr }, { data: msgRows, error: msgErr }, { data: artRows, error: artErr }] =
+      await Promise.all([
+        supabase.from("sources").select("*").eq("notebook_id", id),
+        supabase
+          .from("chat_messages")
+          .select("*")
+          .eq("notebook_id", id)
+          .order("created_at", { ascending: true }),
+        supabase.from("artifacts").select("*").eq("notebook_id", id),
+      ]);
+    if (srcErr || msgErr || artErr) {
+      setToast({
+        message: `Could not refresh this notebook: ${(srcErr ?? msgErr ?? artErr)?.message}`,
+        kind: "error",
+      });
+      return;
+    }
+    setNotebooks((ns) =>
+      ns.map((n) =>
+        n.id === id
+          ? {
+              ...n,
+              sources: (srcRows ?? []).map(mapSourceRow),
+              chat: (msgRows ?? []).map(mapMsgRow),
+              artifacts: (artRows ?? []).map(mapArtifactRow),
+            }
+          : n
+      )
+    );
+  }, []);
+
   const signOut = async () => {
+    // drop the workspace memory so the next login opens a fresh notebook
+    if (uid) {
+      try {
+        sessionStorage.removeItem(`oblm-workspace-${uid}`);
+      } catch {
+        /* private mode */
+      }
+    }
     await supabase.auth.signOut();
     router.replace("/");
     router.refresh();
@@ -326,26 +440,89 @@ export default function DashboardPage() {
 
   const toggleSource = (id: string) => {
     const next = !(active.sources.find((s) => s.id === id)?.enabled ?? false);
-    patchActive({
-      sources: active.sources.map((s) => (s.id === id ? { ...s, enabled: next } : s)),
-    });
-    void supabase.from("sources").update({ enabled: next }).eq("id", id);
+    setNotebooks((ns) =>
+      ns.map((n) =>
+        n.id === active.id
+          ? { ...n, sources: n.sources.map((s) => (s.id === id ? { ...s, enabled: next } : s)) }
+          : n
+      )
+    );
+    supabase
+      .from("sources")
+      .update({ enabled: next })
+      .eq("id", id)
+      .then(({ error }) => {
+        if (error) {
+          // flip the switch back — the DB didn't take it
+          setNotebooks((ns) =>
+            ns.map((n) =>
+              n.id === active.id
+                ? { ...n, sources: n.sources.map((s) => (s.id === id ? { ...s, enabled: !next } : s)) }
+                : n
+            )
+          );
+          setToast({ message: `Could not update the source: ${error.message}`, kind: "error" });
+        }
+      });
   };
 
   const deleteSource = (id: string) => {
-    patchActive({ sources: active.sources.filter((s) => s.id !== id) });
-    void supabase.from("sources").delete().eq("id", id); // chunks cascade
+    const removed = active.sources.find((s) => s.id === id);
+    // remove from state first (snappy UI), but confirm the DB delete — if it
+    // fails the row would silently survive and reappear on next login
+    setNotebooks((ns) =>
+      ns.map((n) =>
+        n.id === active.id ? { ...n, sources: n.sources.filter((s) => s.id !== id) } : n
+      )
+    );
+    supabase
+      .from("sources")
+      .delete()
+      .eq("id", id)
+      .then(({ error }) => {
+        if (error) {
+          // put the card back and tell the user
+          setNotebooks((ns) =>
+            ns.map((n) => {
+              if (n.id !== active.id || !removed || n.sources.some((s) => s.id === id)) return n;
+              return { ...n, sources: [...n.sources, removed] };
+            })
+          );
+          setToast({ message: `Could not delete the source: ${error.message}`, kind: "error" });
+        }
+      });
   };
 
   /* ---------------- chat (search -> rerank -> generate) ---------------- */
+
+  /**
+   * Best-effort client-side fallback for messages the server never sees
+   * (local refusals, network failures). The main chat flow persists history
+   * server-side in /api/chat — this is only for the edge cases.
+   */
+  const saveMsg = (row: {
+    notebook_id: string;
+    role: "user" | "assistant";
+    text: string;
+    flag?: string;
+    citations?: string[];
+  }) => {
+    supabase
+      .from("chat_messages")
+      .insert(row)
+      .then(({ error }) => {
+        if (error)
+          setToast({ message: `Chat history not saved: ${error.message}`, kind: "error" });
+      });
+  };
 
   const sendChat = (text: string) => {
     const history = active.chat
       .filter((m) => !m.error)
       .slice(-6)
       .map((m) => ({ role: m.role, text: m.text }));
+    // NOTE: the user message and the answer are persisted by /api/chat itself
     patchActive({ chat: [...active.chat, { role: "user", text }] });
-    void supabase.from("chat_messages").insert({ notebook_id: active.id, role: "user", text });
 
     const readySources = active.sources.filter((s) => s.enabled && s.status === "ready");
     if (readySources.length === 0) {
@@ -355,7 +532,8 @@ export default function DashboardPage() {
         text: "I don't know about this. Nothing related is stated in the sources — attach sources first, then ask.",
       };
       patchActive({ chat: [...active.chat, { role: "user", text }, reply] });
-      void supabase.from("chat_messages").insert({
+      saveMsg({ notebook_id: active.id, role: "user", text });
+      saveMsg({
         notebook_id: active.id,
         role: "assistant",
         text: reply.text,
@@ -371,17 +549,20 @@ export default function DashboardPage() {
       let finalText: string | null = null;
       let citations: string[] = [];
       let errorMessage: string | null = null;
+      let reachedServer = false;
       try {
         const token = await accessToken();
         const res = await fetch("/api/chat", {
           method: "POST",
           headers: { Authorization: `Bearer ${token}`, "Content-Type": "application/json" },
           body: JSON.stringify({
+            notebook_id: active.id,
             query: text,
             sourceIds: readySources.map((s) => s.id),
             history,
           }),
         });
+        reachedServer = true;
 
         if (!res.ok) {
           const json = (await res.json().catch(() => ({}))) as { error?: string };
@@ -416,12 +597,15 @@ export default function DashboardPage() {
         setNotebooks((ns) =>
           ns.map((n) => (n.id === active.id ? { ...n, chat: [...n.chat, reply] } : n))
         );
-        void supabase.from("chat_messages").insert({
+        saveMsg({
           notebook_id: active.id,
           role: "assistant",
           text: reply.text,
           flag: "error",
         });
+        // if the request never reached the server, the user message wasn't
+        // persisted there either — save it here so history stays honest
+        if (!reachedServer) saveMsg({ notebook_id: active.id, role: "user", text });
         return;
       }
 
@@ -430,12 +614,7 @@ export default function DashboardPage() {
         setNotebooks((ns) =>
           ns.map((n) => (n.id === active.id ? { ...n, chat: [...n.chat, reply] } : n))
         );
-        void supabase.from("chat_messages").insert({
-          notebook_id: active.id,
-          role: "assistant",
-          text: finalText,
-          citations,
-        });
+        // the server persisted the user message and this answer (with citations)
       }
     })();
   };
@@ -526,8 +705,27 @@ export default function DashboardPage() {
   };
 
   const deleteArtifact = (id: string) => {
-    patchActive({ artifacts: active.artifacts.filter((a) => a.id !== id) });
-    void supabase.from("artifacts").delete().eq("id", id);
+    const removed = active.artifacts.find((a) => a.id === id);
+    setNotebooks((ns) =>
+      ns.map((n) =>
+        n.id === active.id ? { ...n, artifacts: n.artifacts.filter((a) => a.id !== id) } : n
+      )
+    );
+    supabase
+      .from("artifacts")
+      .delete()
+      .eq("id", id)
+      .then(({ error }) => {
+        if (error) {
+          setNotebooks((ns) =>
+            ns.map((n) => {
+              if (n.id !== active.id || !removed || n.artifacts.some((a) => a.id === id)) return n;
+              return { ...n, artifacts: [...n.artifacts, removed] };
+            })
+          );
+          setToast({ message: `Could not delete the artifact: ${error.message}`, kind: "error" });
+        }
+      });
   };
 
   /* ---------------- notebooks ---------------- */
@@ -537,29 +735,58 @@ export default function DashboardPage() {
     setNotebooks((ns) => [...ns, nb]);
     setActiveId(nb.id);
     setSidebarOpen(false);
-    void supabase.from("notebooks").insert({
-      id: nb.id,
-      user_id: uid,
-      title: nb.title,
-      created_at: new Date(nb.createdAt).toISOString(),
-    });
+    supabase
+      .from("notebooks")
+      .insert({
+        id: nb.id,
+        user_id: uid,
+        title: nb.title,
+        created_at: new Date(nb.createdAt).toISOString(),
+      })
+      .then(({ error }) => {
+        if (error) {
+          // drop the phantom notebook — it only exists in memory
+          setNotebooks((ns) => ns.filter((n) => n.id !== nb.id));
+          if (activeId === nb.id) setActiveId(notebooks[0]?.id ?? null);
+          setToast({ message: `Could not create the notebook: ${error.message}`, kind: "error" });
+        }
+      });
   };
 
   const deleteNotebook = (id: string) => {
     if (notebooks.length <= 1) return;
+    const removed = notebooks.find((n) => n.id === id);
     const rest = notebooks.filter((n) => n.id !== id);
     setNotebooks(rest);
     if (id === activeId) setActiveId(rest[0].id);
-    // sources, chat, artifacts cascade in the database
-    void supabase.from("notebooks").delete().eq("id", id);
+    // sources, chat, artifacts, and chunks cascade in the database
+    supabase
+      .from("notebooks")
+      .delete()
+      .eq("id", id)
+      .then(({ error }) => {
+        if (error) {
+          // put the notebook back — the cascade delete didn't happen
+          setNotebooks((ns) => (ns.some((n) => n.id === id) || !removed ? ns : [...ns, removed]));
+          setToast({ message: `Could not delete the notebook: ${error.message}`, kind: "error" });
+        }
+      });
   };
 
   const renameNotebook = (title: string) => {
+    const prevTitle = active.title;
     patchActive({ title });
-    void supabase
+    supabase
       .from("notebooks")
       .update({ title, updated_at: new Date().toISOString() })
-      .eq("id", active.id);
+      .eq("id", active.id)
+      .then(({ error }) => {
+        if (error) {
+          // put the old name back so the UI keeps telling the truth
+          patchActive({ title: prevTitle });
+          setToast({ message: `Could not rename the notebook: ${error.message}`, kind: "error" });
+        }
+      });
   };
 
   /* ---------------- derived ---------------- */
@@ -685,15 +912,15 @@ export default function DashboardPage() {
           {/* desktop */}
           <div className="hidden h-full md:block">
             <Group orientation="horizontal" className="h-full">
-              <Panel defaultSize={25} minSize={15} className="border-r-2 border-line bg-surface">
+              <Panel defaultSize={25} minSize={15} className="border-r-2 border-line">
                 {sourcesPane}
               </Panel>
               <Separator className="group relative w-0.5 cursor-col-resize bg-line transition-colors hover:bg-(--accent)" />
-              <Panel defaultSize={55} minSize={30} className="bg-surface">
+              <Panel defaultSize={55} minSize={30}>
                 {chatPane}
               </Panel>
               <Separator className="group relative w-0.5 cursor-col-resize bg-line transition-colors hover:bg-(--accent)" />
-              <Panel defaultSize={20} minSize={14} className="border-l-2 border-line bg-surface">
+              <Panel defaultSize={20} minSize={14} className="border-l-2 border-line">
                 {studioPane}
               </Panel>
             </Group>
@@ -714,6 +941,9 @@ export default function DashboardPage() {
             onSwitch={(id) => {
               setActiveId(id);
               setSidebarOpen(false);
+              // the notebook you open is always re-fetched from the database,
+              // so deleted sources never come back and renames always stick
+              void refreshNotebook(id);
             }}
             onNew={createNotebook}
             onDelete={deleteNotebook}

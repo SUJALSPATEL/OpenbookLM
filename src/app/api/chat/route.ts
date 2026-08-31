@@ -1,5 +1,5 @@
 import { NextResponse } from "next/server";
-import { supabaseAdmin, hasServiceRole, requireUser, HttpError, getOwnedSourceIds } from "@/lib/supabase-admin";
+import { supabaseAdmin, hasServiceRole, requireUser, HttpError, getOwnedSourceIds, notebookBelongsToUser } from "@/lib/supabase-admin";
 import { getEmbeddings } from "@/lib/services/embeddings";
 import { rerankChunks, agentrouter, CHAT_MODEL, type RetrievedChunk } from "@/lib/services/reranker";
 
@@ -13,6 +13,25 @@ const REFUSAL_MESSAGE =
   "I don't know about this. Nothing related is stated in the sources you've attached.";
 
 type HistoryMessage = { role: "user" | "assistant"; text: string };
+
+/**
+ * Persist a chat message with the service role (bypasses RLS — the notebook's
+ * ownership is verified before this is ever called). The server owns chat
+ * persistence so a flaky browser session can never silently lose history.
+ */
+async function saveMessage(row: {
+  notebook_id: string;
+  role: "user" | "assistant";
+  text: string;
+  flag?: string;
+  citations?: string[];
+}): Promise<void> {
+  const { error } = await supabaseAdmin.from("chat_messages").insert(row);
+  if (error) {
+    // never fail the chat over a history write — but never hide it either
+    console.error("[chat] could not save message:", error.message);
+  }
+}
 
 export async function POST(req: Request) {
   try {
@@ -29,9 +48,11 @@ export async function POST(req: Request) {
       query?: string;
       sourceIds?: string[];
       history?: HistoryMessage[];
+      notebook_id?: string;
     };
     const query = body.query?.trim();
     const sourceIds = body.sourceIds ?? [];
+    const notebookId = body.notebook_id?.trim() ?? null;
 
     if (!query) {
       return NextResponse.json({ error: "query is required." }, { status: 400 });
@@ -41,6 +62,18 @@ export async function POST(req: Request) {
         { error: "sourceIds is required — attach at least one source." },
         { status: 400 }
       );
+    }
+
+    // chat history is saved server-side — the notebook must be the caller's own
+    const canSave = notebookId ? await notebookBelongsToUser(userId, notebookId) : false;
+    if (notebookId && !canSave) {
+      return NextResponse.json(
+        { error: "That notebook does not belong to you." },
+        { status: 403 }
+      );
+    }
+    if (canSave) {
+      await saveMessage({ notebook_id: notebookId!, role: "user", text: query });
     }
 
     const ownedIds = await getOwnedSourceIds(userId, sourceIds);
@@ -66,6 +99,14 @@ export async function POST(req: Request) {
 
     const retrieved = (candidates ?? []) as RetrievedChunk[];
     if (retrieved.length === 0) {
+      if (canSave) {
+        await saveMessage({
+          notebook_id: notebookId!,
+          role: "assistant",
+          text: REFUSAL_MESSAGE,
+          flag: "refusal",
+        });
+      }
       return plainTextResponse(REFUSAL_MESSAGE);
     }
 
@@ -110,12 +151,17 @@ ${contextBlock}`;
     });
 
     const encoder = new TextEncoder();
+    const citationIds = context.map((c) => c.id);
     const readable = new ReadableStream<Uint8Array>({
       async start(controller) {
+        let acc = "";
         try {
           for await (const part of stream) {
             const delta = part.choices[0]?.delta?.content;
-            if (delta) controller.enqueue(encoder.encode(delta));
+            if (delta) {
+              acc += delta;
+              controller.enqueue(encoder.encode(delta));
+            }
           }
         } catch (err) {
           console.error("[chat] stream interrupted:", err);
@@ -124,6 +170,16 @@ ${contextBlock}`;
           );
         } finally {
           controller.close();
+          // the finished answer is persisted server-side, citations and all —
+          // saving here (not in the browser) is what makes history survive
+          if (canSave && acc.trim()) {
+            await saveMessage({
+              notebook_id: notebookId!,
+              role: "assistant",
+              text: acc.trim(),
+              citations: citationIds,
+            });
+          }
         }
       },
     });
@@ -132,7 +188,7 @@ ${contextBlock}`;
       headers: {
         "Content-Type": "text/plain; charset=utf-8",
         "Cache-Control": "no-store",
-        "X-Citation-Chunk-Ids": JSON.stringify(context.map((c) => c.id)),
+        "X-Citation-Chunk-Ids": JSON.stringify(citationIds),
       },
     });
   } catch (err) {
