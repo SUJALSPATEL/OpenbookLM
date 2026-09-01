@@ -170,25 +170,33 @@ ${contextBlock}`;
     // The gateway can answer 200 without a usable body (missing/empty choices).
     // Guard every level so a malformed reply is a clean message, never a raw
     // "Cannot read properties of undefined (reading '0')".
-    const content = completion.choices?.[0]?.message?.content?.trim() ?? "";
+    const message = completion.choices?.[0]?.message;
+    let content = message?.content?.trim() ?? "";
     if (!content) {
-      // Almost always a gateway config problem (e.g. AGENTROUTER_BASE_URL
-      // without the /v1 path returns empty completions) — log enough to
-      // diagnose, and surface the configured values in the error so the user
-      // can see exactly what to fix on Vercel without digging into logs.
-      const baseURL = process.env.AGENTROUTER_BASE_URL ?? "(unset)";
-      console.error(
-        `[studio] empty completion for "${task}" — model=${CHAT_MODEL}, ` +
-          `baseURL=${baseURL}, ` +
-          `finish=${completion.choices?.[0]?.finish_reason ?? "n/a"}. ` +
-          `Check AGENTROUTER_MODEL / AGENTROUTER_BASE_URL.`
-      );
-      throw new Error(
-        `The model returned an empty artifact — the LLM gateway is misconfigured. ` +
-          `baseURL=${baseURL}, model=${CHAT_MODEL}. ` +
-          `Set AGENTROUTER_BASE_URL to https://agentrouter.org/v1 (and AGENTROUTER_MODEL, ` +
-          `AGENTROUTER_API_KEY) in the Vercel env, then redeploy.`
-      );
+      // deepseek-v4-flash can exhaust its whole token budget reasoning and
+      // leave content empty with the answer in reasoning_content — use that as
+      // the artifact rather than failing (the reranker already does this).
+      const reasoning = (message as { reasoning_content?: string } | undefined)?.reasoning_content?.trim() ?? "";
+      if (reasoning) {
+        console.warn(
+          `[studio] "${task}" returned reasoning only (${reasoning.length} chars) — using it as the artifact.`
+        );
+        content = reasoning;
+      } else {
+        const baseURL = process.env.AGENTROUTER_BASE_URL ?? "(unset)";
+        const key = maskKey(process.env.AGENTROUTER_API_KEY);
+        const finish = completion.choices?.[0]?.finish_reason ?? "n/a";
+        console.error(
+          `[studio] empty completion for "${task}" — model=${CHAT_MODEL}, ` +
+            `baseURL=${baseURL}, key=${key}, finish=${finish}. ` +
+            `Check AGENTROUTER_MODEL / AGENTROUTER_BASE_URL / AGENTROUTER_API_KEY.`
+        );
+        throw new Error(
+          `The model returned an empty artifact. Config: baseURL=${baseURL}, model=${CHAT_MODEL}, ` +
+            `key=${key}, finish=${finish}. If key=${key} does not match the AGENTROUTER_API_KEY ` +
+            `in your local .env.local, paste the correct one into the Vercel env and redeploy.`
+        );
+      }
     }
 
     /* 4. validate JSON tasks, fall back to markdown display if the model strayed */
@@ -243,6 +251,15 @@ function isContentFilterError(message: string): boolean {
   return /sensitive\s*words?|content\s*polic|content\s*filter|flagged|prohibited|inappropriate/i.test(
     message
   );
+}
+
+/** Mask an API key so diagnostics reveal whether the deployed key matches the
+ *  local one (first/last 4 chars only — never the full secret). */
+function maskKey(raw: string | undefined): string {
+  const key = raw?.trim();
+  if (!key) return "(unset)";
+  if (key.length <= 8) return `(${key.length} chars)`;
+  return `${key.slice(0, 4)}…${key.slice(-4)}`;
 }
 
 /** Extract a JSON object from model output, tolerating fences and prose. */

@@ -155,32 +155,50 @@ ${contextBlock}`;
     const readable = new ReadableStream<Uint8Array>({
       async start(controller) {
         let acc = "";
+        let reasoning = "";
         try {
           for await (const part of stream) {
-            const delta = part.choices?.[0]?.delta?.content;
+            const choice = part.choices?.[0];
+            const delta = choice?.delta?.content;
+            const reasonDelta = (choice?.delta as { reasoning_content?: string } | undefined)?.reasoning_content;
+            if (reasonDelta) reasoning += reasonDelta;
             if (delta) {
               acc += delta;
               controller.enqueue(encoder.encode(delta));
             }
           }
-          // stream ended but produced nothing — don't silently serve an empty
-          // answer or save a blank assistant message; say what's configured so
-          // the user can fix the Vercel env without hunting through logs
+          // stream ended but produced nothing visible — don't silently serve an
+          // empty answer or save a blank assistant message
           if (!acc.trim()) {
             const baseURL = process.env.AGENTROUTER_BASE_URL ?? "(unset)";
-            console.error(
-              `[chat] stream produced no content — model=${CHAT_MODEL}, ` +
-                `baseURL=${baseURL}. ` +
-                `Check AGENTROUTER_MODEL / AGENTROUTER_BASE_URL.`
-            );
-            controller.enqueue(
-              encoder.encode(
-                `[The model returned nothing — the LLM gateway is misconfigured. ` +
-                  `baseURL=${baseURL}, model=${CHAT_MODEL}. Set AGENTROUTER_BASE_URL to ` +
-                  `https://agentrouter.org/v1 (and AGENTROUTER_MODEL, AGENTROUTER_API_KEY) ` +
-                  `in the Vercel env, then redeploy.]`
-              )
-            );
+            const key = maskKey(process.env.AGENTROUTER_API_KEY);
+            if (reasoning.trim()) {
+              // deepseek-v4-flash can exhaust its whole token budget reasoning
+              // and leave content empty (documented quirk — the reranker already
+              // handles this). Serve the reasoning so the user gets an answer
+              // instead of nothing.
+              console.error(
+                `[chat] content empty but reasoning present (${reasoning.length} chars) — serving reasoning. ` +
+                  `model=${CHAT_MODEL}, baseURL=${baseURL}, key=${key}.`
+              );
+              acc = reasoning.trim();
+              controller.enqueue(encoder.encode(acc));
+            } else {
+              // nothing at all — surface the configured values (masked key) so
+              // the user can compare against .env.local without hunting logs
+              console.error(
+                `[chat] stream produced no content at all — model=${CHAT_MODEL}, ` +
+                  `baseURL=${baseURL}, key=${key}. ` +
+                  `Check AGENTROUTER_MODEL / AGENTROUTER_BASE_URL / AGENTROUTER_API_KEY.`
+              );
+              controller.enqueue(
+                encoder.encode(
+                  `[The model returned nothing. Config: baseURL=${baseURL}, model=${CHAT_MODEL}, ` +
+                    `key=${key}. If key=${key} does not match the AGENTROUTER_API_KEY in your ` +
+                    `local .env.local, paste the correct one into the Vercel env and redeploy.]`
+                )
+              );
+            }
           }
         } catch (err) {
           console.error("[chat] stream interrupted:", err);
@@ -224,4 +242,13 @@ function plainTextResponse(text: string): Response {
   return new Response(text, {
     headers: { "Content-Type": "text/plain; charset=utf-8", "Cache-Control": "no-store" },
   });
+}
+
+/** Mask an API key so diagnostics reveal whether the deployed key matches the
+ *  local one (first/last 4 chars only — never the full secret). */
+function maskKey(raw: string | undefined): string {
+  const key = raw?.trim();
+  if (!key) return "(unset)";
+  if (key.length <= 8) return `(${key.length} chars)`;
+  return `${key.slice(0, 4)}…${key.slice(-4)}`;
 }
