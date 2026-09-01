@@ -4,15 +4,45 @@ import OpenAI from "openai";
  * AgentRouter-backed OpenAI-compatible client.
  * The gateway only accepts Claude Code-style clients, so we send its User-Agent.
  */
+
+const DEFAULT_BASE_URL = "https://agentrouter.org/v1";
+const DEFAULT_MODEL = "deepseek-v4-flash";
+
+/** Trim; treat empty/whitespace env values as unset so `?? default` works. */
+function nonEmpty(value: string | undefined): string | undefined {
+  const trimmed = value?.trim();
+  return trimmed ? trimmed : undefined;
+}
+
+/**
+ * Normalize the gateway base URL. A bare host like `https://agentrouter.org`
+ * (no API path) silently returns EMPTY completions from the gateway — the SDK
+ * appends `/chat/completions` to whatever base you give it, and the root path
+ * is not a valid API endpoint. Append `/v1` only when the configured URL has
+ * no path at all; any explicit path (`/v1`, `/api`, …) is respected as-is.
+ */
+function normalizeBaseURL(raw: string | undefined): string {
+  const base = nonEmpty(raw) ?? DEFAULT_BASE_URL;
+  try {
+    const url = new URL(base);
+    if (url.pathname === "/" || url.pathname === "") {
+      url.pathname = "/v1";
+    }
+    return url.toString().replace(/\/$/, "");
+  } catch {
+    return DEFAULT_BASE_URL;
+  }
+}
+
 export const agentrouter = new OpenAI({
-  apiKey: process.env.AGENTROUTER_API_KEY ?? "missing-agentrouter-key",
-  baseURL: process.env.AGENTROUTER_BASE_URL ?? "https://agentrouter.org/v1",
+  apiKey: nonEmpty(process.env.AGENTROUTER_API_KEY) ?? "missing-agentrouter-key",
+  baseURL: normalizeBaseURL(process.env.AGENTROUTER_BASE_URL),
   defaultHeaders: {
     "User-Agent": "claude-cli/2.0.14 (external, cli)",
   },
 });
 
-export const CHAT_MODEL = process.env.AGENTROUTER_MODEL ?? "deepseek-v4-flash";
+export const CHAT_MODEL = nonEmpty(process.env.AGENTROUTER_MODEL) ?? DEFAULT_MODEL;
 
 export type RetrievedChunk = {
   id: string;

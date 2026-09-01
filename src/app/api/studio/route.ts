@@ -172,6 +172,14 @@ ${contextBlock}`;
     // "Cannot read properties of undefined (reading '0')".
     const content = completion.choices?.[0]?.message?.content?.trim() ?? "";
     if (!content) {
+      // Almost always a gateway config problem (e.g. AGENTROUTER_BASE_URL
+      // without the /v1 path returns empty completions) — log enough to diagnose.
+      console.error(
+        `[studio] empty completion for "${task}" — model=${CHAT_MODEL}, ` +
+          `baseURL=${process.env.AGENTROUTER_BASE_URL ?? "(unset)"}, ` +
+          `finish=${completion.choices?.[0]?.finish_reason ?? "n/a"}. ` +
+          `Check AGENTROUTER_MODEL / AGENTROUTER_BASE_URL.`
+      );
       throw new Error("The model returned an empty artifact. Try again.");
     }
 

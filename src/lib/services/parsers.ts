@@ -1,4 +1,10 @@
-import { YoutubeTranscript } from "youtube-transcript";
+import {
+  YoutubeTranscript,
+  YoutubeTranscriptDisabledError,
+  YoutubeTranscriptNotAvailableError,
+  YoutubeTranscriptTooManyRequestError,
+  YoutubeTranscriptVideoUnavailableError,
+} from "youtube-transcript";
 
 /**
  * Source parsers: every function takes raw user input and returns extracted
@@ -146,25 +152,100 @@ function extractVideoId(videoUrl: string): string {
   throw new Error("That doesn't look like a YouTube link");
 }
 
+const YOUTUBE_FETCH_TIMEOUT_MS = 15_000; // a hung/bot-challenged request must never stall a server function
+const YOUTUBE_TRANSCRIPT_RETRIES = 3;
+
+/**
+ * fetch hook for youtube-transcript. The library's own requests get bot-blocked
+ * by YouTube when they come from datacenter/hosted IPs (e.g. Vercel), and the
+ * default fetch has no timeout. Add browser-like Origin/Referer headers plus a
+ * hard timeout; parseYouTube then retries, because these blocks are frequently
+ * transient.
+ */
+function youtubeFetch(input: RequestInfo | URL, init?: RequestInit): Promise<Response> {
+  return fetch(input, {
+    ...init,
+    signal: AbortSignal.timeout(YOUTUBE_FETCH_TIMEOUT_MS),
+    headers: {
+      ...(init?.headers ?? {}),
+      Origin: "https://www.youtube.com",
+      Referer: "https://www.youtube.com/",
+    },
+  });
+}
+
 export async function parseYouTube(
   videoUrl: string
 ): Promise<{ markdown: string; title: string | null }> {
   const videoId = extractVideoId(videoUrl);
-  let segments: { text: string }[];
-  try {
-    segments = await YoutubeTranscript.fetchTranscript(videoId);
-  } catch {
-    throw new Error("No transcript is available for this video");
+
+  let lastError: unknown;
+  for (let attempt = 1; attempt <= YOUTUBE_TRANSCRIPT_RETRIES; attempt++) {
+    let segments: { text: string }[] = [];
+    try {
+      segments = await YoutubeTranscript.fetchTranscript(videoId, { fetch: youtubeFetch });
+    } catch (err) {
+      lastError = err;
+      // permanent outcomes — retrying will not change the result
+      if (
+        err instanceof YoutubeTranscriptDisabledError ||
+        err instanceof YoutubeTranscriptVideoUnavailableError ||
+        err instanceof YoutubeTranscriptNotAvailableError
+      ) {
+        break;
+      }
+      // transient block / captcha / network — back off briefly and retry
+      if (attempt < YOUTUBE_TRANSCRIPT_RETRIES) {
+        await new Promise((r) => setTimeout(r, 600 * attempt));
+        continue;
+      }
+      break;
+    }
+
+    const transcript = segments
+      .map((s) => s.text.trim())
+      .filter(Boolean)
+      .join(" ")
+      .replace(/\s+/g, " ")
+      .trim();
+    if (transcript) {
+      const title = await fetchVideoTitle(videoId);
+      return { markdown: `# YouTube transcript\n\n${transcript}\n`, title };
+    }
+    // empty transcript without a throw — treat as retryable and try once more
+    lastError = new YoutubeTranscriptNotAvailableError(videoId);
   }
-  const transcript = segments
-    .map((s) => s.text.trim())
-    .filter(Boolean)
-    .join(" ")
-    .replace(/\s+/g, " ")
-    .trim();
-  if (!transcript) throw new Error("No transcript is available for this video");
-  const title = await fetchVideoTitle(videoId);
-  return { markdown: `# YouTube transcript\n\n${transcript}\n`, title };
+
+  throw transcriptUnavailableError(videoId, lastError);
+}
+
+/**
+ * Turn the library's specific error classes into a message the user can act on.
+ * The library collapses every failure into the same class, so distinguishing
+ * "YouTube blocks this server" from "the creator disabled captions" matters —
+ * they have very different fixes.
+ */
+function transcriptUnavailableError(videoId: string, cause: unknown): Error {
+  if (cause instanceof YoutubeTranscriptTooManyRequestError) {
+    return new Error(
+      "YouTube is blocking requests from this server (datacenter/hosted IPs are often bot-flagged). " +
+        "Wait a minute and try again, or add the video from a local run where YouTube isn't blocked."
+    );
+  }
+  if (cause instanceof YoutubeTranscriptVideoUnavailableError) {
+    return new Error("This video is no longer available or is private.");
+  }
+  if (
+    cause instanceof YoutubeTranscriptDisabledError ||
+    cause instanceof YoutubeTranscriptNotAvailableError
+  ) {
+    return new Error(
+      "No transcript is available for this video — the creator has captions/subtitles disabled."
+    );
+  }
+  return new Error(
+    "Could not fetch this video's transcript. YouTube sometimes blocks hosted servers; wait a moment and try again."
+  );
 }
 
 /** Video title via the public oEmbed endpoint — no API key needed. */

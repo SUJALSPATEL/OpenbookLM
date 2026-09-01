@@ -163,6 +163,18 @@ ${contextBlock}`;
               controller.enqueue(encoder.encode(delta));
             }
           }
+          // stream ended but produced nothing — don't silently serve an empty
+          // answer or save a blank assistant message
+          if (!acc.trim()) {
+            console.error(
+              `[chat] stream produced no content — model=${CHAT_MODEL}, ` +
+                `baseURL=${process.env.AGENTROUTER_BASE_URL ?? "(unset)"}. ` +
+                `Check AGENTROUTER_MODEL / AGENTROUTER_BASE_URL.`
+            );
+            controller.enqueue(
+              encoder.encode("[The model returned nothing. This is usually a gateway config issue — try again in a moment.]")
+            );
+          }
         } catch (err) {
           console.error("[chat] stream interrupted:", err);
           controller.enqueue(

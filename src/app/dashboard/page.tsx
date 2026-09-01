@@ -1,7 +1,7 @@
 "use client";
 
 import Link from 'next/link';
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import Image from "next/image";
 import { useRouter } from "next/navigation";
 import { Group, Panel, Separator } from "react-resizable-panels";
@@ -41,6 +41,31 @@ function newNotebook(title = "Untitled notebook"): Notebook {
     chat: [],
     artifacts: [],
   };
+}
+
+/**
+ * Insert a source row, retrying once after a session refresh when RLS rejects
+ * the write. Right after login a rare cookie/session race can send the request
+ * without an authenticated token, which RLS answers with a 403 — refreshing the
+ * session and retrying silently heals it instead of failing the user's first
+ * action on the dashboard.
+ */
+async function insertSourceRow(row: {
+  id: string;
+  notebook_id: string;
+  title: string;
+  meta: string;
+  kind: SourceKind;
+  status: Source["status"];
+  enabled: boolean;
+}): Promise<{ code?: string; message: string } | null> {
+  const { error } = await supabase.from("sources").insert(row);
+  if (error && /42501|row-level security|permission denied/i.test(`${error.code ?? ""} ${error.message}`)) {
+    await supabase.auth.refreshSession();
+    const { error: retryErr } = await supabase.from("sources").insert(row);
+    if (!retryErr) return null;
+  }
+  return error;
 }
 
 /* ---------------- db row -> app state mappers ---------------- */
@@ -104,7 +129,12 @@ export default function DashboardPage() {
   const [uid, setUid] = useState<string | null>(null);
   const [authChecked, setAuthChecked] = useState(false);
 
-  const [notebooks, setNotebooks] = useState<Notebook[]>(() => [newNotebook()]);
+  // Empty until the workspace actually loads. The old "placeholder notebook"
+  // seed was a real bug: while it was `active`, a source added in that window
+  // referenced a notebook row that doesn't exist (RLS 403) — or, once the real
+  // notebooks loaded, `active` fell back to notebooks[0] and routed the source
+  // into the wrong notebook entirely.
+  const [notebooks, setNotebooks] = useState<Notebook[]>([]);
   const [activeId, setActiveId] = useState<string>("");
   const [sidebarOpen, setSidebarOpen] = useState(false);
   const [mobileTab, setMobileTab] = useState<"sources" | "chat" | "studio">("chat");
@@ -117,10 +147,21 @@ export default function DashboardPage() {
   const [openArtifact, setOpenArtifact] = useState<Artifact | null>(null);
   const [citation, setCitation] = useState<CitationState>(null);
   const [toast, setToast] = useState<Toast>(null);
+  // React StrictMode double-invokes effects in dev. The workspace loader must
+  // run once: a second run re-decides "fresh login -> new notebook" and creates
+  // a duplicate, and a source added mid-race can hit RLS before the notebook is
+  // committed. Guard the whole boot so one mount === one run.
+  const booted = useRef(false);
+  // The workspace panes render only once this is true. Until then every render
+  // has no notebooks and a blank activeId — a loading screen, not a fake
+  // notebook the user could add sources to by accident.
+  const [workspaceReady, setWorkspaceReady] = useState(false);
 
   /* ---------------- auth + load this user's workspace ---------------- */
 
   useEffect(() => {
+    if (booted.current) return;
+    booted.current = true;
     supabase.auth.getSession().then(async ({ data }) => {
       if (!data.session) {
         router.replace("/auth");
@@ -132,112 +173,121 @@ export default function DashboardPage() {
       setUid(u.id);
       setAuthChecked(true);
 
-      const { data: rows } = await supabase
-        .from("notebooks")
-        .select("*")
-        .eq("user_id", u.id)
-        .order("created_at", { ascending: true });
-
-      let nbs: Notebook[] = (rows ?? []).map(
-        (r: { id: string; title: string; created_at: string }) => ({
-          id: r.id,
-          title: r.title,
-          createdAt: new Date(r.created_at).getTime(),
-          sources: [],
-          chat: [],
-          artifacts: [],
-        })
-      );
-
-      // first visit -> seed one empty notebook for this account
-      if (nbs.length === 0) {
-        const nb = newNotebook();
-        const { error: seedErr } = await supabase.from("notebooks").insert({
-          id: nb.id,
-          user_id: u.id,
-          title: nb.title,
-          created_at: new Date(nb.createdAt).toISOString(),
-        });
-        if (seedErr) setToast({ message: `Could not create your first notebook: ${seedErr.message}`, kind: "error" });
-        nbs = [nb];
-      }
-
-      const ids = nbs.map((n) => n.id);
-      const [{ data: srcRows }, { data: msgRows }, { data: artRows }] = await Promise.all([
-        supabase.from("sources").select("*").in("notebook_id", ids),
-        supabase
-          .from("chat_messages")
-          .select("*")
-          .in("notebook_id", ids)
-          .order("created_at", { ascending: true }),
-        supabase.from("artifacts").select("*").in("notebook_id", ids),
-      ]);
-
-      const byId = new Map(nbs.map((n) => [n.id, n]));
-      for (const r of (srcRows ?? []) as (SourceRow & { notebook_id: string })[]) {
-        byId.get(r.notebook_id)?.sources.push(mapSourceRow(r));
-      }
-      for (const r of (msgRows ?? []) as (MsgRow & { notebook_id: string })[]) {
-        byId.get(r.notebook_id)?.chat.push(mapMsgRow(r));
-      }
-      for (const r of (artRows ?? []) as (ArtifactRow & { notebook_id: string })[]) {
-        byId.get(r.notebook_id)?.artifacts.push(mapArtifactRow(r));
-      }
-
-      setNotebooks(nbs);
-
-      // Per browser session: refreshes keep the same workspace, but every
-      // fresh login lands on a brand-new notebook — the previous ones stay
-      // in the notebook history sidebar with all their sources, chat, and
-      // studio artifacts (all persisted in Supabase under this account).
-      const sessionKey = `oblm-workspace-${u.id}`;
-      let remembered: string | null = null;
       try {
-        remembered = sessionStorage.getItem(sessionKey);
-      } catch {
-        /* private mode — treat as fresh */
-      }
+        const { data: rows } = await supabase
+          .from("notebooks")
+          .select("*")
+          .eq("user_id", u.id)
+          .order("created_at", { ascending: true });
 
-      let activeNotebookId =
-        remembered && nbs.some((n) => n.id === remembered) ? remembered : null;
+        let nbs: Notebook[] = (rows ?? []).map(
+          (r: { id: string; title: string; created_at: string }) => ({
+            id: r.id,
+            title: r.title,
+            createdAt: new Date(r.created_at).getTime(),
+            sources: [],
+            chat: [],
+            artifacts: [],
+          })
+        );
 
-      if (!activeNotebookId) {
-        const newest = nbs[nbs.length - 1];
-        const untouched =
-          newest &&
-          newest.sources.length === 0 &&
-          newest.chat.length === 0 &&
-          newest.artifacts.length === 0;
-        if (untouched) {
-          // newest notebook was never used — start there instead of stacking empties
-          activeNotebookId = newest.id;
-        } else {
-          // previous session had content -> open a fresh notebook for this login
-          const nb = newNotebook(`Untitled notebook ${nbs.length + 1}`);
-          const { error: freshErr } = await supabase.from("notebooks").insert({
+        // first visit -> seed one empty notebook for this account
+        if (nbs.length === 0) {
+          const nb = newNotebook();
+          const { error: seedErr } = await supabase.from("notebooks").insert({
             id: nb.id,
             user_id: u.id,
             title: nb.title,
             created_at: new Date(nb.createdAt).toISOString(),
           });
-          if (freshErr) {
-            // no phantom notebooks — stay in the newest one and say why
-            setToast({ message: `Could not start a new notebook: ${freshErr.message}`, kind: "error" });
+          if (seedErr) setToast({ message: `Could not create your first notebook: ${seedErr.message}`, kind: "error" });
+          nbs = [nb];
+        }
+
+        const ids = nbs.map((n) => n.id);
+        const [{ data: srcRows }, { data: msgRows }, { data: artRows }] = await Promise.all([
+          supabase.from("sources").select("*").in("notebook_id", ids),
+          supabase
+            .from("chat_messages")
+            .select("*")
+            .in("notebook_id", ids)
+            .order("created_at", { ascending: true }),
+          supabase.from("artifacts").select("*").in("notebook_id", ids),
+        ]);
+
+        const byId = new Map(nbs.map((n) => [n.id, n]));
+        for (const r of (srcRows ?? []) as (SourceRow & { notebook_id: string })[]) {
+          byId.get(r.notebook_id)?.sources.push(mapSourceRow(r));
+        }
+        for (const r of (msgRows ?? []) as (MsgRow & { notebook_id: string })[]) {
+          byId.get(r.notebook_id)?.chat.push(mapMsgRow(r));
+        }
+        for (const r of (artRows ?? []) as (ArtifactRow & { notebook_id: string })[]) {
+          byId.get(r.notebook_id)?.artifacts.push(mapArtifactRow(r));
+        }
+
+        setNotebooks(nbs);
+
+        // Per browser session: refreshes keep the same workspace, but every
+        // fresh login lands on a brand-new notebook — the previous ones stay
+        // in the notebook history sidebar with all their sources, chat, and
+        // studio artifacts (all persisted in Supabase under this account).
+        const sessionKey = `oblm-workspace-${u.id}`;
+        let remembered: string | null = null;
+        try {
+          remembered = sessionStorage.getItem(sessionKey);
+        } catch {
+          /* private mode — treat as fresh */
+        }
+
+        let activeNotebookId =
+          remembered && nbs.some((n) => n.id === remembered) ? remembered : null;
+
+        if (!activeNotebookId) {
+          const newest = nbs[nbs.length - 1];
+          const untouched =
+            newest &&
+            newest.sources.length === 0 &&
+            newest.chat.length === 0 &&
+            newest.artifacts.length === 0;
+          if (untouched) {
+            // newest notebook was never used — start there instead of stacking empties
             activeNotebookId = newest.id;
           } else {
-            nbs = [...nbs, nb];
-            activeNotebookId = nb.id;
+            // previous session had content -> open a fresh notebook for this login
+            const nb = newNotebook(`Untitled notebook ${nbs.length + 1}`);
+            const { error: freshErr } = await supabase.from("notebooks").insert({
+              id: nb.id,
+              user_id: u.id,
+              title: nb.title,
+              created_at: new Date(nb.createdAt).toISOString(),
+            });
+            if (freshErr) {
+              // no phantom notebooks — stay in the newest one and say why
+              setToast({ message: `Could not start a new notebook: ${freshErr.message}`, kind: "error" });
+              activeNotebookId = newest.id;
+            } else {
+              nbs = [...nbs, nb];
+              activeNotebookId = nb.id;
+            }
           }
         }
-      }
 
-      try {
-        sessionStorage.setItem(sessionKey, activeNotebookId);
-      } catch {
-        /* private mode — refreshes will just pick the newest empty notebook */
+        try {
+          sessionStorage.setItem(sessionKey, activeNotebookId);
+        } catch {
+          /* private mode — refreshes will just pick the newest empty notebook */
+        }
+        setNotebooks(nbs);
+        setActiveId(activeNotebookId);
+      } catch (err) {
+        const message = err instanceof Error ? err.message : "Could not load your workspace.";
+        setToast({ message, kind: "error" });
+      } finally {
+        // the workspace is fully resolved now — the panes that render from here
+        // on always see a real, DB-backed active notebook, never a placeholder
+        setWorkspaceReady(true);
       }
-      setNotebooks(nbs);
-      setActiveId(activeNotebookId);
     });
   }, [router]);
 
@@ -274,10 +324,12 @@ export default function DashboardPage() {
 
   const active = notebooks.find((n) => n.id === activeId) ?? notebooks[0];
 
+  // Match on activeId, not active.id — active can be undefined while the
+  // workspace loads, and the panes only render after it resolves anyway.
   const patchActive = useCallback(
     (patch: Partial<Notebook>) =>
-      setNotebooks((ns) => ns.map((n) => (n.id === active.id ? { ...n, ...patch } : n))),
-    [active.id]
+      setNotebooks((ns) => ns.map((n) => (n.id === activeId ? { ...n, ...patch } : n))),
+    [activeId]
   );
 
   const accessToken = async (): Promise<string | null> => {
@@ -352,7 +404,7 @@ export default function DashboardPage() {
     };
     patchActive({ sources: [...active.sources, src] });
 
-    const { error: insertError } = await supabase.from("sources").insert({
+    const insertError = await insertSourceRow({
       id,
       notebook_id: active.id,
       title: draft.title,
@@ -909,33 +961,53 @@ export default function DashboardPage() {
         ))}
       </div>
 
-      {/* main: blurs behind the notebook sidebar */}
+      {/* main: blurs behind the notebook sidebar. The panes render only once
+          the workspace is loaded — before that, active is undefined and letting
+          the user add a source would either 403 (phantom notebook) or land it
+          in the wrong notebook. */}
       <main className="relative z-10 min-h-0 flex-1">
-        <div className={`h-full transition-[filter] duration-200 ${sidebarOpen ? "blur-[2px]" : ""}`}>
-          {/* desktop */}
-          <div className="hidden h-full md:block">
-            <Group orientation="horizontal" className="h-full">
-              <Panel defaultSize={25} minSize={15} className="border-r-2 border-line">
-                {sourcesPane}
-              </Panel>
-              <Separator className="group relative w-0.5 cursor-col-resize bg-line transition-colors hover:bg-(--accent)" />
-              <Panel defaultSize={55} minSize={30}>
-                {chatPane}
-              </Panel>
-              <Separator className="group relative w-0.5 cursor-col-resize bg-line transition-colors hover:bg-(--accent)" />
-              <Panel defaultSize={20} minSize={14} className="border-l-2 border-line">
-                {studioPane}
-              </Panel>
-            </Group>
-          </div>
+        {workspaceReady ? (
+          notebooks.length > 0 ? (
+            <div className={`h-full transition-[filter] duration-200 ${sidebarOpen ? "blur-[2px]" : ""}`}>
+              {/* desktop */}
+              <div className="hidden h-full md:block">
+                <Group orientation="horizontal" className="h-full">
+                  <Panel defaultSize={25} minSize={15} className="border-r-2 border-line">
+                    {sourcesPane}
+                  </Panel>
+                  <Separator className="group relative w-0.5 cursor-col-resize bg-line transition-colors hover:bg-(--accent)" />
+                  <Panel defaultSize={55} minSize={30}>
+                    {chatPane}
+                  </Panel>
+                  <Separator className="group relative w-0.5 cursor-col-resize bg-line transition-colors hover:bg-(--accent)" />
+                  <Panel defaultSize={20} minSize={14} className="border-l-2 border-line">
+                    {studioPane}
+                  </Panel>
+                </Group>
+              </div>
 
-          {/* mobile */}
-          <div className="h-full md:hidden">
-            {mobileTab === "sources" && sourcesPane}
-            {mobileTab === "chat" && chatPane}
-            {mobileTab === "studio" && studioPane}
+              {/* mobile */}
+              <div className="h-full md:hidden">
+                {mobileTab === "sources" && sourcesPane}
+                {mobileTab === "chat" && chatPane}
+                {mobileTab === "studio" && studioPane}
+              </div>
+            </div>
+          ) : (
+            <div className="flex h-full items-center justify-center">
+              <p className="max-w-sm px-6 text-center font-mono text-[12px] leading-relaxed text-muted-c">
+                Couldn&apos;t load your workspace. Check your connection and reload the page.
+              </p>
+            </div>
+          )
+        ) : (
+          <div className="flex h-full items-center justify-center">
+            <div className="flex items-center gap-3 font-mono text-[12px] text-muted-c">
+              <span className="h-2 w-2 animate-pulse rounded-full bg-emerald-500" />
+              Loading workspace…
+            </div>
           </div>
-        </div>
+        )}
 
         {sidebarOpen && authChecked && active && (
           <NotebookSidebar
