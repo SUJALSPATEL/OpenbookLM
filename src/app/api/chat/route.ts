@@ -164,15 +164,22 @@ ${contextBlock}`;
             }
           }
           // stream ended but produced nothing — don't silently serve an empty
-          // answer or save a blank assistant message
+          // answer or save a blank assistant message; say what's configured so
+          // the user can fix the Vercel env without hunting through logs
           if (!acc.trim()) {
+            const baseURL = process.env.AGENTROUTER_BASE_URL ?? "(unset)";
             console.error(
               `[chat] stream produced no content — model=${CHAT_MODEL}, ` +
-                `baseURL=${process.env.AGENTROUTER_BASE_URL ?? "(unset)"}. ` +
+                `baseURL=${baseURL}. ` +
                 `Check AGENTROUTER_MODEL / AGENTROUTER_BASE_URL.`
             );
             controller.enqueue(
-              encoder.encode("[The model returned nothing. This is usually a gateway config issue — try again in a moment.]")
+              encoder.encode(
+                `[The model returned nothing — the LLM gateway is misconfigured. ` +
+                  `baseURL=${baseURL}, model=${CHAT_MODEL}. Set AGENTROUTER_BASE_URL to ` +
+                  `https://agentrouter.org/v1 (and AGENTROUTER_MODEL, AGENTROUTER_API_KEY) ` +
+                  `in the Vercel env, then redeploy.]`
+              )
             );
           }
         } catch (err) {

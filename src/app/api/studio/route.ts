@@ -173,14 +173,22 @@ ${contextBlock}`;
     const content = completion.choices?.[0]?.message?.content?.trim() ?? "";
     if (!content) {
       // Almost always a gateway config problem (e.g. AGENTROUTER_BASE_URL
-      // without the /v1 path returns empty completions) — log enough to diagnose.
+      // without the /v1 path returns empty completions) — log enough to
+      // diagnose, and surface the configured values in the error so the user
+      // can see exactly what to fix on Vercel without digging into logs.
+      const baseURL = process.env.AGENTROUTER_BASE_URL ?? "(unset)";
       console.error(
         `[studio] empty completion for "${task}" — model=${CHAT_MODEL}, ` +
-          `baseURL=${process.env.AGENTROUTER_BASE_URL ?? "(unset)"}, ` +
+          `baseURL=${baseURL}, ` +
           `finish=${completion.choices?.[0]?.finish_reason ?? "n/a"}. ` +
           `Check AGENTROUTER_MODEL / AGENTROUTER_BASE_URL.`
       );
-      throw new Error("The model returned an empty artifact. Try again.");
+      throw new Error(
+        `The model returned an empty artifact — the LLM gateway is misconfigured. ` +
+          `baseURL=${baseURL}, model=${CHAT_MODEL}. ` +
+          `Set AGENTROUTER_BASE_URL to https://agentrouter.org/v1 (and AGENTROUTER_MODEL, ` +
+          `AGENTROUTER_API_KEY) in the Vercel env, then redeploy.`
+      );
     }
 
     /* 4. validate JSON tasks, fall back to markdown display if the model strayed */
