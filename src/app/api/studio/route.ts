@@ -1,7 +1,7 @@
 import { NextResponse } from "next/server";
 import { supabaseAdmin, hasServiceRole, requireUser, HttpError, getOwnedSourceIds } from "@/lib/supabase-admin";
 import { getEmbeddings } from "@/lib/services/embeddings";
-import { rerankChunks, agentrouter, CHAT_MODEL, type RetrievedChunk } from "@/lib/services/reranker";
+import { rerankChunks, llm, CHAT_MODEL, type RetrievedChunk } from "@/lib/services/reranker";
 
 export const runtime = "nodejs";
 export const maxDuration = 300;
@@ -157,7 +157,7 @@ ${config.instructions}
 CONTEXT CHUNKS:
 ${contextBlock}`;
 
-    const completion = await agentrouter.chat.completions.create({
+    const completion = await llm.chat.completions.create({
       model: CHAT_MODEL,
       temperature: 0.2,
       max_tokens: config.maxTokens,
@@ -173,7 +173,7 @@ ${contextBlock}`;
     const message = completion.choices?.[0]?.message;
     let content = message?.content?.trim() ?? "";
     if (!content) {
-      // deepseek-v4-flash can exhaust its whole token budget reasoning and
+      // a thinking model can exhaust its whole token budget reasoning and
       // leave content empty with the answer in reasoning_content — use that as
       // the artifact rather than failing (the reranker already does this).
       const reasoning = (message as { reasoning_content?: string } | undefined)?.reasoning_content?.trim() ?? "";
@@ -183,17 +183,17 @@ ${contextBlock}`;
         );
         content = reasoning;
       } else {
-        const baseURL = process.env.AGENTROUTER_BASE_URL ?? "(unset)";
-        const key = maskKey(process.env.AGENTROUTER_API_KEY);
+        const baseURL = process.env.GEMINI_BASE_URL ?? "(unset)";
+        const key = maskKey(process.env.GEMINI_API_KEY);
         const finish = completion.choices?.[0]?.finish_reason ?? "n/a";
         console.error(
           `[studio] empty completion for "${task}" — model=${CHAT_MODEL}, ` +
             `baseURL=${baseURL}, key=${key}, finish=${finish}. ` +
-            `Check AGENTROUTER_MODEL / AGENTROUTER_BASE_URL / AGENTROUTER_API_KEY.`
+            `Check GEMINI_MODEL / GEMINI_BASE_URL / GEMINI_API_KEY.`
         );
         throw new Error(
           `The model returned an empty artifact. Config: baseURL=${baseURL}, model=${CHAT_MODEL}, ` +
-            `key=${key}, finish=${finish}. If key=${key} does not match the AGENTROUTER_API_KEY ` +
+            `key=${key}, finish=${finish}. If key=${key} does not match the GEMINI_API_KEY ` +
             `in your local .env.local, paste the correct one into the Vercel env and redeploy.`
         );
       }

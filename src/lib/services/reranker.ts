@@ -1,12 +1,12 @@
 import OpenAI from "openai";
 
 /**
- * AgentRouter-backed OpenAI-compatible client.
- * The gateway only accepts Claude Code-style clients, so we send its User-Agent.
+ * Google Gemini via its OpenAI-compatible endpoint
+ * (https://generativelanguage.googleapis.com/v1beta/openai).
  */
 
-const DEFAULT_BASE_URL = "https://agentrouter.org/v1";
-const DEFAULT_MODEL = "deepseek-v4-flash";
+const DEFAULT_BASE_URL = "https://generativelanguage.googleapis.com/v1beta/openai";
+const DEFAULT_MODEL = "gemini-3.6-flash";
 
 /** Trim; treat empty/whitespace env values as unset so `?? default` works. */
 function nonEmpty(value: string | undefined): string | undefined {
@@ -15,18 +15,19 @@ function nonEmpty(value: string | undefined): string | undefined {
 }
 
 /**
- * Normalize the gateway base URL. A bare host like `https://agentrouter.org`
- * (no API path) silently returns EMPTY completions from the gateway — the SDK
- * appends `/chat/completions` to whatever base you give it, and the root path
- * is not a valid API endpoint. Append `/v1` only when the configured URL has
- * no path at all; any explicit path (`/v1`, `/api`, …) is respected as-is.
+ * Normalize the Gemini base URL. A bare host like
+ * `https://generativelanguage.googleapis.com` (no API path) is NOT a valid
+ * completions endpoint — the SDK appends `/chat/completions` to whatever base
+ * it is given, and Google only exposes that route under `/v1beta/openai`.
+ * Append the correct path only when the configured URL has no path at all;
+ * any explicit path is respected as-is.
  */
 function normalizeBaseURL(raw: string | undefined): string {
   const base = nonEmpty(raw) ?? DEFAULT_BASE_URL;
   try {
     const url = new URL(base);
     if (url.pathname === "/" || url.pathname === "") {
-      url.pathname = "/v1";
+      url.pathname = "/v1beta/openai";
     }
     return url.toString().replace(/\/$/, "");
   } catch {
@@ -34,15 +35,12 @@ function normalizeBaseURL(raw: string | undefined): string {
   }
 }
 
-export const agentrouter = new OpenAI({
-  apiKey: nonEmpty(process.env.AGENTROUTER_API_KEY) ?? "missing-agentrouter-key",
-  baseURL: normalizeBaseURL(process.env.AGENTROUTER_BASE_URL),
-  // defaultHeaders: {
-  //   "User-Agent": "claude-cli/2.0.14 (external, cli)",
-  // },
+export const llm = new OpenAI({
+  apiKey: nonEmpty(process.env.GEMINI_API_KEY) ?? "missing-gemini-key",
+  baseURL: normalizeBaseURL(process.env.GEMINI_BASE_URL),
 });
 
-export const CHAT_MODEL = nonEmpty(process.env.AGENTROUTER_MODEL) ?? DEFAULT_MODEL;
+export const CHAT_MODEL = nonEmpty(process.env.GEMINI_MODEL) ?? DEFAULT_MODEL;
 
 export type RetrievedChunk = {
   id: string;
@@ -93,7 +91,7 @@ Return the JSON array of relevant chunk id strings now.`;
 
   let keepIds: string[] | null = null;
   try {
-    const completion = await agentrouter.chat.completions.create({
+    const completion = await llm.chat.completions.create({
       model: CHAT_MODEL,
       temperature: 0.1,
       // reasoning tokens count against this budget, so keep it generous
@@ -107,9 +105,11 @@ Return the JSON array of relevant chunk id strings now.`;
     console.log("🔥 RAW COMPLETION:", JSON.stringify(completion, null, 2));
     const message = completion.choices?.[0]?.message;
     const raw = message?.content ?? "";
+    // thinking models (gemini-3.6-flash) spend tokens reasoning before writing
+    // content — a too-small budget can exhaust it with content still empty
     keepIds = parseIdArray(raw, chunks);
-    // reasoning models sometimes exhaust the budget before writing content —
-    // the id array may still be sitting in the reasoning trace
+    // safety net for gateways that surface the answer in reasoning_content
+    // (Gemini does not, but a 200-with-no-usable-body is cheap to guard)
     if (keepIds === null) {
       const reasoning = (message as { reasoning_content?: string } | undefined)?.reasoning_content ?? "";
       keepIds = parseIdArray(reasoning, chunks);

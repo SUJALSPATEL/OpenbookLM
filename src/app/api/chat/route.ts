@@ -1,7 +1,7 @@
 import { NextResponse } from "next/server";
 import { supabaseAdmin, hasServiceRole, requireUser, HttpError, getOwnedSourceIds, notebookBelongsToUser } from "@/lib/supabase-admin";
 import { getEmbeddings } from "@/lib/services/embeddings";
-import { rerankChunks, agentrouter, CHAT_MODEL, type RetrievedChunk } from "@/lib/services/reranker";
+import { rerankChunks, llm, CHAT_MODEL, type RetrievedChunk } from "@/lib/services/reranker";
 
 export const runtime = "nodejs";
 export const maxDuration = 120;
@@ -138,7 +138,7 @@ ${contextBlock}`;
 
     const history = (body.history ?? []).slice(-MAX_HISTORY_TURNS);
 
-    const stream = await agentrouter.chat.completions.create({
+    const stream = await llm.chat.completions.create({
       model: CHAT_MODEL,
       temperature: 0.2,
       stream: true,
@@ -170,13 +170,12 @@ ${contextBlock}`;
           // stream ended but produced nothing visible — don't silently serve an
           // empty answer or save a blank assistant message
           if (!acc.trim()) {
-            const baseURL = process.env.AGENTROUTER_BASE_URL ?? "(unset)";
-            const key = maskKey(process.env.AGENTROUTER_API_KEY);
+            const baseURL = process.env.GEMINI_BASE_URL ?? "(unset)";
+            const key = maskKey(process.env.GEMINI_API_KEY);
             if (reasoning.trim()) {
-              // deepseek-v4-flash can exhaust its whole token budget reasoning
-              // and leave content empty (documented quirk — the reranker already
-              // handles this). Serve the reasoning so the user gets an answer
-              // instead of nothing.
+              // a thinking model can exhaust its whole token budget reasoning
+              // and leave content empty. Serve the reasoning so the user gets
+              // an answer instead of nothing.
               console.error(
                 `[chat] content empty but reasoning present (${reasoning.length} chars) — serving reasoning. ` +
                   `model=${CHAT_MODEL}, baseURL=${baseURL}, key=${key}.`
@@ -189,12 +188,12 @@ ${contextBlock}`;
               console.error(
                 `[chat] stream produced no content at all — model=${CHAT_MODEL}, ` +
                   `baseURL=${baseURL}, key=${key}. ` +
-                  `Check AGENTROUTER_MODEL / AGENTROUTER_BASE_URL / AGENTROUTER_API_KEY.`
+                  `Check GEMINI_MODEL / GEMINI_BASE_URL / GEMINI_API_KEY.`
               );
               controller.enqueue(
                 encoder.encode(
                   `[The model returned nothing. Config: baseURL=${baseURL}, model=${CHAT_MODEL}, ` +
-                    `key=${key}. If key=${key} does not match the AGENTROUTER_API_KEY in your ` +
+                    `key=${key}. If key=${key} does not match the GEMINI_API_KEY in your ` +
                     `local .env.local, paste the correct one into the Vercel env and redeploy.]`
                 )
               );
