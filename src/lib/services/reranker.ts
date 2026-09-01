@@ -37,9 +37,9 @@ function normalizeBaseURL(raw: string | undefined): string {
 export const agentrouter = new OpenAI({
   apiKey: nonEmpty(process.env.AGENTROUTER_API_KEY) ?? "missing-agentrouter-key",
   baseURL: normalizeBaseURL(process.env.AGENTROUTER_BASE_URL),
-  defaultHeaders: {
-    "User-Agent": "claude-cli/2.0.14 (external, cli)",
-  },
+  // defaultHeaders: {
+  //   "User-Agent": "claude-cli/2.0.14 (external, cli)",
+  // },
 });
 
 export const CHAT_MODEL = nonEmpty(process.env.AGENTROUTER_MODEL) ?? DEFAULT_MODEL;
@@ -95,7 +95,7 @@ Return the JSON array of relevant chunk id strings now.`;
   try {
     const completion = await agentrouter.chat.completions.create({
       model: CHAT_MODEL,
-      temperature: 0,
+      temperature: 0.1,
       // reasoning tokens count against this budget, so keep it generous
       max_tokens: 4000,
       messages: [
@@ -104,6 +104,7 @@ Return the JSON array of relevant chunk id strings now.`;
       ],
     });
 
+    console.log("🔥 RAW COMPLETION:", JSON.stringify(completion, null, 2));
     const message = completion.choices?.[0]?.message;
     const raw = message?.content ?? "";
     keepIds = parseIdArray(raw, chunks);
